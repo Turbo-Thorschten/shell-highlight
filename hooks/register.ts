@@ -1,19 +1,16 @@
-import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import { chunks, layout, lineCount, outputLines, takeLines, visible } from './text'
+import { cells, chunks, layout, lineCount, outputLines, takeLines, visible } from './text'
 import type { Piece, Shell } from './text'
 
 const SHELLS: Record<string, Shell> = { Bash: 'bash', PowerShell: 'powershell' }
 const FOLDED_COMMAND_LINES = 10
 const FOLDED_OUTPUT_LINES = 5
 const FOLD_SLACK = 1
-const STORED_CALLS = 500
 const DIM = 'inactive'
 const LIT = { color: 'text' }
 
-const expanded = atom({ plugin: 'shell-highlight', key: 'expanded' } as const, [])
-const drawnRows = new Set<string>()
+const groupRows = new Set<string>()
 
 type RenderEvent = Parameters<EngineInterface['ui']['resolve']>[0]
 
@@ -38,30 +35,17 @@ function shellCommand(tool: string, input: unknown): ShellCommand | undefined {
   return { shell, command, description: typeof fields.description === 'string' ? fields.description : '' }
 }
 
-async function loadExpanded($: EngineInterface) {
-  const stored = await $.store.get('expanded').catch(() => undefined)
-  const ids = Array.isArray(stored) ? stored.filter((id): id is string => typeof id === 'string') : []
-  await update($, expanded, () => ids)
-}
-
-async function toggle($: EngineInterface, id: string) {
-  const ids = await read($, expanded)
-  const next = ids.includes(id) ? ids.filter(one => one !== id) : [...ids, id].slice(-STORED_CALLS)
-  await update($, expanded, () => next)
-  await $.store.set('expanded', next).catch(() => undefined)
-}
-
 function draw(
   $: EngineInterface,
   e: RenderEvent,
   call: Call,
   shown: ShellCommand,
-  expandedIds: readonly string[] | undefined,
-  viewportColumns: number | undefined,
+  isFolded: boolean,
+  hasOutput: boolean,
+  viewport: { columns: number; isFullscreen?: boolean } | undefined,
 ) {
-  const { Box, Text, Code, Button } = $.ui.resolve(e)
-  const isExpanded = expandedIds?.includes(call.id) === true
-  const columns = Math.max(20, (viewportColumns ?? 80) - 6)
+  const { Box, Text, Code } = $.ui.resolve(e)
+  const columns = Math.max(20, (viewport?.columns ?? 80) - 6)
   const code = (piece: Piece, source: string) =>
     Code({ source, ...(piece.language !== undefined ? { language: piece.language } : {}), ...(piece.path !== undefined ? { path: piece.path } : {}) })
   const dim = (text: string) => Text({ color: DIM, hover: LIT, children: [text] })
@@ -85,15 +69,15 @@ function draw(
 
   const blocks = layout(shown.command, shown.shell, columns)
   const commandLines = lineCount(blocks)
-  const canFoldCommand = commandLines > FOLDED_COMMAND_LINES + FOLD_SLACK
+  const isCommandCut = isFolded && commandLines > FOLDED_COMMAND_LINES + FOLD_SLACK
   const body = []
-  for (const block of canFoldCommand && !isExpanded ? takeLines(blocks, FOLDED_COMMAND_LINES) : blocks) {
+  for (const block of isCommandCut ? takeLines(blocks, FOLDED_COMMAND_LINES) : blocks) {
     if (block.kind === 'row') {
       body.push(
         Box({
           flexDirection: 'row',
           children: block.pieces.map(piece =>
-            Box({ flexShrink: 0, flexGrow: 0, width: piece.source.length, children: [code(piece, piece.source)] }),
+            Box({ flexShrink: 0, flexGrow: 0, width: cells(piece.source), children: [code(piece, piece.source)] }),
           ),
         }),
       )
@@ -101,34 +85,19 @@ function draw(
       for (const source of chunks(block.piece.source)) body.push(code(block.piece, source))
     }
   }
-  let hidden = canFoldCommand && !isExpanded ? commandLines - FOLDED_COMMAND_LINES : 0
+  let hidden = isCommandCut ? commandLines - FOLDED_COMMAND_LINES : 0
   if (hidden > 0) body.push(dim('…'))
 
   const result = []
-  const lines = outputLines(call.output)
-  const canFoldOutput = lines.length > FOLDED_OUTPUT_LINES + FOLD_SLACK
-  const visibleLines = canFoldOutput && !isExpanded ? lines.slice(0, FOLDED_OUTPUT_LINES) : lines
+  const lines = hasOutput ? outputLines(call.output) : []
+  const isOutputCut = isFolded && lines.length > FOLDED_OUTPUT_LINES + FOLD_SLACK
+  const visibleLines = isOutputCut ? lines.slice(0, FOLDED_OUTPUT_LINES) : lines
   hidden += lines.length - visibleLines.length
   if (call.isRunning) result.push(dim('Running…'))
-  else if (lines.length === 0) result.push(dim('(no output)'))
-  else for (const text of chunks(visibleLines.join('\n'))) result.push(dim(text))
+  else if (lines.length > 0) for (const text of chunks(visibleLines.join('\n'))) result.push(dim(text))
+  else if (hasOutput && call.output !== undefined) result.push(dim('(no output)'))
+  if (hidden > 0) result.push(dim(`… +${hidden} lines (${viewport?.isFullscreen === true ? 'click' : 'ctrl+o'} to expand)`))
 
-  if (expandedIds === undefined) {
-    if (hidden > 0) result.push(dim(`… +${hidden} lines`))
-  } else if (hidden > 0 || (isExpanded && (canFoldCommand || canFoldOutput))) {
-    result.push(
-      Box({
-        children: [
-          Button({
-            key: `toggle-${call.id}`,
-            label: hidden > 0 ? `… +${hidden} lines` : 'show less',
-            variant: 'secondary',
-            onPress: () => toggle($, call.id),
-          }),
-        ],
-      }),
-    )
-  }
   if (result.length > 0) {
     body.push(
       Box({
@@ -151,30 +120,22 @@ function draw(
 }
 
 export const register: Register = on => {
-  on('session.start', async ($, e, next) => {
-    await loadExpanded($)
-    return next(e)
-  })
-
-  on('classic.SessionStart', { source: ['clear', 'resume', 'fork'] }, async ($, e, next) => {
-    await loadExpanded($)
-    return next(e)
-  })
-
   on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
+    if (e.props.isExpanded) {
+      for (const call of e.props.calls) if (call.tool_use_id !== undefined) groupRows.add(call.tool_use_id)
+      return next(e)
+    }
     const calls = e.props.calls.map((call, index) => ({
       call: { ...call, id: call.tool_use_id ?? `${String(e.requestId)}-${index}` },
       shown: shellCommand(call.tool, call.input),
     }))
     const shellCalls = calls.filter(one => one.shown !== undefined)
     if (shellCalls.length === 0) return next(e)
-    if (e.props.isExpanded) return next(e)
-    if (shellCalls.length === calls.length) return next({ ...e, props: { ...e.props, isExpanded: true } })
 
     const { Box } = $.ui.resolve(e)
-    const rows = [await next(e)]
+    const rows = shellCalls.length === calls.length ? [] : [await next(e)]
     for (const one of shellCalls) {
-      if (one.shown !== undefined) rows.push(draw($, e, one.call, one.shown, undefined, e.viewport?.columns))
+      if (one.shown !== undefined) rows.push(draw($, e, one.call, one.shown, true, true, e.viewport))
     }
     return Box({ flexDirection: 'column', children: rows })
   })
@@ -183,12 +144,11 @@ export const register: Register = on => {
     const shown = shellCommand(e.props.tool, e.props.input)
     if (shown === undefined) return next(e)
     const call = { ...e.props, id: e.props.tool_use_id }
-    drawnRows.add(call.id)
-    return draw($, e, call, shown, await read($, expanded), e.viewport?.columns)
+    return draw($, e, call, shown, false, groupRows.has(call.id), e.viewport)
   })
 
   on('ui.render', { component: 'ToolResult' }, ($, e, next) => {
-    if (!drawnRows.has(e.props.tool_use_id)) return next(e)
+    if (!groupRows.has(e.props.tool_use_id)) return next(e)
     const { Box } = $.ui.resolve(e)
     return Box({ children: [] })
   })

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { chunks, layout, lineCount, outputLines, takeLines, visible } from '../hooks/text'
+import { cells, chunks, layout, lineCount, outputLines, takeLines, visible } from '../hooks/text'
 import type { Block } from '../hooks/text'
 
 const shape = (blocks: Block[]) =>
@@ -40,14 +40,50 @@ describe('layout', () => {
     ])
   })
 
-  test('an inline script wider than the room stays one shell block', async () => {
+  test('an inline script wider than the room is wrapped at spaces', async () => {
     const command = `node -e 'console.log(1)' && echo ok`
-    expect(shape(layout(command, 'bash', 20))).toEqual([`bash:${command}`])
+    expect(shape(layout(command, 'bash', 20))).toEqual([
+      ["bash:node -e '"],
+      ['javascript:console.log(1)', "bash:'", 'bash: && '],
+      ['bash:echo ok'],
+    ])
   })
 
-  test('a row with wide characters stays one shell block', async () => {
-    const command = `python -c 'print("日本")'`
+  test('a wrap prefers a space outside a string', async () => {
+    const command = `node -e 'log("a b c d e f g"); done()'`
+    expect(shape(layout(command, 'bash', 31))).toEqual([
+      ["bash:node -e '", 'javascript:log("a b c d e f g"); '],
+      ['javascript:done()', "bash:'"],
+    ])
+  })
+
+  test('a word longer than the room is cut', async () => {
+    const command = `node -e '${'x'.repeat(50)}'`
+    expect(shape(layout(command, 'bash', 20))).toEqual([
+      ["bash:node -e '"],
+      [`javascript:${'x'.repeat(20)}`],
+      [`javascript:${'x'.repeat(20)}`],
+      [`javascript:${'x'.repeat(10)}`, "bash:'"],
+    ])
+  })
+
+  test('wide characters count as two cells', async () => {
+    expect(cells('日本 ok')).toBe(7)
+    expect(shape(layout(`python -c 'print("日本")'`, 'bash', 80))).toEqual([
+      ["bash:python -c '", 'python:print("日本")', "bash:'"],
+    ])
+  })
+
+  test('a row with characters of unsure width stays one shell block', async () => {
+    const command = `python -c 'print("é")'`
     expect(shape(layout(command, 'bash', 80))).toEqual([`bash:${command}`])
+  })
+
+  test('cmd /c and an interactive shell take their script as code', async () => {
+    expect(shape(layout(`cmd /c "dir /b"`, 'powershell', 80))).toEqual([['powershell:cmd /c "', 'bat:dir /b', 'powershell:"']])
+    expect(shape(layout(`wsl -e zsh -ic 'uv --version'`, 'powershell', 80))).toEqual([
+      ["powershell:wsl -e zsh -ic '", 'bash:uv --version', "powershell:'"],
+    ])
   })
 
   test('a multi-line inline script keeps its lines', async () => {

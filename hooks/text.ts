@@ -28,6 +28,7 @@ const INTERPRETERS: Record<string, string> = {
   zsh: 'bash',
   pwsh: 'powershell',
   powershell: 'powershell',
+  cmd: 'bat',
 }
 
 const EVAL_FLAGS: Record<string, string[]> = {
@@ -37,13 +38,14 @@ const EVAL_FLAGS: Record<string, string[]> = {
   ruby: ['-e'],
   perl: ['-e', '-E'],
   php: ['-r'],
-  bash: ['-c'],
+  bash: ['-c', '-ic', '-lc', '-ilc', '-lic'],
   powershell: ['-c', '-Command', '-command'],
+  bat: ['/c', '/C', '/k', '/K'],
 }
 
 const INTERPRETER_NAMES = Object.keys(INTERPRETERS).join('|')
 const EVAL = new RegExp(
-  `(?<![\\w./-])(${INTERPRETER_NAMES})(?:\\.exe)?[ \\t]+(?:-[\\w=:.-]+[ \\t]+)*?([\\w-]+)[ \\t]+(['"])`,
+  `(?<![\\w./-])(${INTERPRETER_NAMES})(?:\\.exe)?[ \\t]+(?:-[\\w=:.-]+[ \\t]+)*?(\\/?[\\w-]+)[ \\t]+(['"])`,
   'g',
 )
 const INTERPRETER_WORD = new RegExp(`(?<![\\w./-])(${INTERPRETER_NAMES})(?:\\.exe)?(?![\\w.-])`)
@@ -52,7 +54,59 @@ const HERE_STRING = /@(['"])[ \t]*\n/g
 const REDIRECT = /(?:>>?|\btee(?:[ \t]+-a)?|\b(?:Set-Content|Add-Content|Out-File)(?:[ \t]+-(?:Path|FilePath|LiteralPath))?)[ \t]*(['"]?)([^\s'"|;&<>]+)\1/
 const ANSI = /\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\)|[@-Z\\-_])/g
 const CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f]/g
-const WIDE = /[^\u0000-ɏ]/
+const WIDE = /[\u{1100}-\u{115f}\u{2e80}-\u{a4cf}\u{ac00}-\u{d7a3}\u{f900}-\u{faff}\u{fe30}-\u{fe4f}\u{ff00}-\u{ff60}\u{ffe0}-\u{ffe6}\u{1f300}-\u{1faff}\u{20000}-\u{3fffd}]/u
+const UNSURE_WIDTH = /[\u{300}-\u{36f}\u{483}-\u{489}\u{591}-\u{5c7}\u{610}-\u{61a}\u{64b}-\u{65f}\u{900}-\u{dff}\u{e31}-\u{e4e}\u{200b}-\u{200f}\u{2028}-\u{202e}\u{2060}-\u{206f}\u{2600}-\u{27bf}\u{fe00}-\u{fe0f}\u{1f1e6}-\u{1f1ff}\u{e0000}-\u{e0fff}]/u
+
+export function cells(text: string): number {
+  let width = 0
+  for (const ch of text) width += WIDE.test(ch) ? 2 : 1
+  return width
+}
+
+function breakAt(source: string, room: number): number {
+  let used = 0
+  let at = 0
+  let quote = ''
+  let isEscaped = false
+  let outsideQuotes = 0
+  let anywhere = 0
+  for (const ch of source) {
+    used += WIDE.test(ch) ? 2 : 1
+    if (used > room) break
+    at += ch.length
+    if (isEscaped) isEscaped = false
+    else if (ch === '\\') isEscaped = true
+    else if (quote !== '') quote = ch === quote ? '' : quote
+    else if (ch === "'" || ch === '"' || ch === '`') quote = ch
+    if (ch === ' ') {
+      anywhere = at
+      if (quote === '') outsideQuotes = at
+    }
+  }
+  return outsideQuotes > 0 ? outsideQuotes : anywhere > 0 ? anywhere : -at
+}
+
+function wrap(parts: Piece[], columns: number): Piece[][] {
+  const rows: Piece[][] = [[]]
+  const queue = [...parts]
+  let room = columns
+  for (let piece = queue.shift(); piece !== undefined; piece = queue.shift()) {
+    const row = rows[rows.length - 1] ?? []
+    const width = cells(piece.source)
+    if (width <= room) {
+      row.push(piece)
+      room -= width
+      continue
+    }
+    const found = breakAt(piece.source, room)
+    const cut = found > 0 ? found : row.length > 0 ? 0 : Math.max(-found, [...piece.source][0]?.length ?? 1)
+    if (cut > 0) row.push({ ...piece, source: piece.source.slice(0, cut) })
+    queue.unshift({ ...piece, source: piece.source.slice(cut) })
+    rows.push([])
+    room = columns
+  }
+  return rows.filter(row => row.length > 0)
+}
 
 export function visible(text: string): string {
   return text
@@ -158,13 +212,12 @@ export function layout(command: string, shell: Shell, columns: number): Block[] 
   for (const line of lines) {
     const filled = line.filter(piece => piece.source !== '')
     const parts = filled.length > 0 ? filled : line.slice(0, 1)
-    const width = parts.reduce((sum, piece) => sum + piece.source.length, 0)
     const single: Piece =
       parts.length === 1 && parts[0] !== undefined
         ? parts[0]
         : { source: parts.map(piece => piece.source).join(''), language: shell }
-    if (parts.length > 1 && width <= columns && !WIDE.test(single.source)) {
-      blocks.push({ kind: 'row', pieces: parts })
+    if (parts.length > 1 && !UNSURE_WIDTH.test(single.source)) {
+      for (const pieces of wrap(parts, columns)) blocks.push({ kind: 'row', pieces })
       continue
     }
     const last = blocks[blocks.length - 1]

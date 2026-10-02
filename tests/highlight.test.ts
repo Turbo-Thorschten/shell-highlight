@@ -1,5 +1,5 @@
-import type { On, RenderElement } from 'claude-code'
-import { expect, mock, test } from 'claude-code/testing'
+import type { RenderElement } from 'claude-code'
+import { expect, test } from 'claude-code/testing'
 
 const ENGINE_ROW: RenderElement = { type: 'Text', props: {}, children: ['engine row'] }
 const VIEWPORT = { columns: 100, rows: 30, isFullscreen: true }
@@ -18,16 +18,6 @@ function row(tool: string, input: unknown, more: Record<string, unknown> = {}) {
 
 type GroupCall = { tool: string; input: unknown; tool_use_id?: string; output?: unknown }
 
-function memoryStore(on: On, entries: Record<string, unknown>) {
-  const saved = new Map(Object.entries(entries))
-  on('store.get', ($, e) => ({ value: saved.get(e.key) }))
-  on('store.set', ($, e) => {
-    saved.set(e.key, e.value)
-    return { value: undefined }
-  })
-  return saved
-}
-
 function group(calls: readonly GroupCall[], isExpanded = false) {
   return {
     plugin: 'shell-highlight',
@@ -40,10 +30,11 @@ function group(calls: readonly GroupCall[], isExpanded = false) {
 
 const SEQ = { tool_use_id: 'toolu_1', tool: 'Bash', input: { command: 'seq 1 8' }, output: { stdout: EIGHT_LINES, stderr: '' } }
 const READ = { tool_use_id: 'toolu_2', tool: 'Read', input: { file_path: 'README.md' } }
+const LONG_COMMAND = Array.from({ length: 14 }, (_, n) => `echo ${n + 1}`).join('\n')
+const LONG = { tool_use_id: 'toolu_1', tool: 'Bash', input: { command: LONG_COMMAND }, output: { stdout: 'ok', stderr: '' } }
 
 for (const surface of ['terminal', 'desktop'] as const) {
   test(`${surface}: a Bash command is drawn as highlighted code`, async ($, on) => {
-    mock.store(on, {})
     on('ui.render', () => ENGINE_ROW)
     const ui = await $.ui.mount({ ...row('Bash', { command: 'cd ~/.claude && ls -la', description: 'List' }), surface })
     expect((await ui.find({ type: 'Code' }))?.props).toMatchObject({ source: 'cd ~/.claude && ls -la', language: 'bash' })
@@ -53,7 +44,6 @@ for (const surface of ['terminal', 'desktop'] as const) {
   })
 
   test(`${surface}: a PowerShell command is drawn as highlighted code`, async ($, on) => {
-    mock.store(on, {})
     on('ui.render', () => ENGINE_ROW)
     const ui = await $.ui.mount({ ...row('PowerShell', { command: 'Get-ChildItem -Force' }), surface })
     expect((await ui.find({ type: 'Code' }))?.props).toMatchObject({ language: 'powershell' })
@@ -61,7 +51,6 @@ for (const surface of ['terminal', 'desktop'] as const) {
   })
 
   test(`${surface}: an embedded script is highlighted in its own language`, async ($, on) => {
-    mock.store(on, {})
     on('ui.render', () => ENGINE_ROW)
     const command = "node <<'EOF'\nconsole.log(1)\nEOF"
     const ui = await $.ui.mount({ ...row('Bash', { command }), surface })
@@ -71,7 +60,6 @@ for (const surface of ['terminal', 'desktop'] as const) {
   })
 
   test(`${surface}: a command with control characters is still drawn`, async ($, on) => {
-    mock.store(on, {})
     on('ui.render', () => ENGINE_ROW)
     const ui = await $.ui.mount({ ...row('Bash', { command: 'printf "\u001b[31mred"' }), surface })
     expect((await ui.find({ type: 'Code' }))?.props).toMatchObject({ source: 'printf "␛[31mred"' })
@@ -79,7 +67,6 @@ for (const surface of ['terminal', 'desktop'] as const) {
   })
 
   test(`${surface}: a command longer than one element is drawn in several`, async ($, on) => {
-    mock.store(on, {})
     on('ui.render', () => ENGINE_ROW)
     const command = Array.from({ length: 8 }, (_, n) => `echo ${'x'.repeat(3000)}${n}`).join('\n')
     const ui = await $.ui.mount({ ...row('Bash', { command }), surface })
@@ -87,26 +74,67 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await ui.unmount()
   })
 
-  test(`${surface}: the engine's result block is left empty for a row the mod drew`, async ($, on) => {
-    mock.store(on, {})
+  test(`${surface}: a row of an unfolded group shows the whole command and the whole output`, async ($, on) => {
+    on('ui.render', () => ENGINE_ROW)
+    const unfolded = await $.ui.mount({ ...group([{ ...LONG, output: SEQ.output }], true), surface })
+    const ui = await $.ui.mount({ ...row('Bash', LONG.input, { output: SEQ.output }), surface })
+    expect((await ui.find({ type: 'Code' }))?.props?.source).toBe(LONG_COMMAND)
+    expect(await ui.find({ text: 'line 8' })).toBeDefined()
+    await ui.unmount()
+    await unfolded.unmount()
+  })
+
+  test(`${surface}: a row of an unfolded group without output says so, a running one says it runs`, async ($, on) => {
+    on('ui.render', () => ENGINE_ROW)
+    const input = { command: 'true' }
+    const output = { stdout: '', stderr: '' }
+    const unfolded = await $.ui.mount({ ...group([{ tool_use_id: 'toolu_1', tool: 'Bash', input, output }], true), surface })
+    const ui = await $.ui.mount({ ...row('Bash', input, { output }), surface })
+    expect(await ui.find({ text: '(no output)' })).toBeDefined()
+    await ui.redraw({ tool_use_id: 'toolu_1', tool: 'Bash', input, ...DONE, isRunning: true })
+    expect(await ui.find({ text: 'Running…' })).toBeDefined()
+    await ui.unmount()
+    await unfolded.unmount()
+  })
+
+  test(`${surface}: a row on its own draws the command and leaves the output to the engine`, async ($, on) => {
+    on('ui.render', () => ENGINE_ROW)
+    const ui = await $.ui.mount({ ...row('Bash', SEQ.input, { output: SEQ.output }), surface })
+    expect((await ui.find({ type: 'Code' }))?.props).toMatchObject({ source: 'seq 1 8' })
+    expect(await ui.find({ text: 'line 1' })).toBeUndefined()
+    await ui.unmount()
+
+    const result = { tool_use_id: 'toolu_1', tool: 'Bash', output: SEQ.output, isErrored: false }
+    const block = await $.ui.mount({ plugin: 'shell-highlight', component: 'ToolResult', requestId: 'toolu_1', viewport: VIEWPORT, props: result, surface })
+    expect(await block.find({ text: 'engine row' })).toBeDefined()
+    await block.unmount()
+  })
+
+  test(`${surface}: a call that has not run yet has no output line`, async ($, on) => {
+    on('ui.render', () => ENGINE_ROW)
+    const ui = await $.ui.mount({ ...row('Bash', { command: 'true' }), surface })
+    expect(await ui.find({ type: 'Code' })).toBeDefined()
+    expect(await ui.find({ text: '(no output)' })).toBeUndefined()
+    expect(await ui.find({ text: '⎿' })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test(`${surface}: the engine's result block is left empty for a row that drew its output`, async ($, on) => {
     on('ui.render', () => ENGINE_ROW)
     const result = { tool_use_id: 'toolu_1', tool: 'Bash', output: SEQ.output, isErrored: false }
     const target = { plugin: 'shell-highlight', component: 'ToolResult', requestId: 'toolu_1', viewport: VIEWPORT, props: result, surface } as const
 
-    const before = await $.ui.mount(target)
-    expect(await before.find({ text: 'engine row' })).toBeDefined()
-    await before.unmount()
-
+    const unfolded = await $.ui.mount({ ...group([SEQ], true), surface })
     const drawn = await $.ui.mount({ ...row('Bash', SEQ.input, { output: SEQ.output }), surface })
     expect(await drawn.find({ text: 'line 1' })).toBeDefined()
-    const after = await $.ui.mount(target)
-    expect(await after.find({ text: 'engine row' })).toBeUndefined()
-    await after.unmount()
+    const block = await $.ui.mount(target)
+    expect(await block.find({ text: 'engine row' })).toBeUndefined()
+    await block.unmount()
     await drawn.unmount()
+    await unfolded.unmount()
   })
 
   test(`${surface}: other tools keep the engine's row`, async ($, on) => {
-    mock.store(on, {})
     on('ui.render', () => ENGINE_ROW)
     const ui = await $.ui.mount({ ...row('Read', READ.input), surface })
     expect(await ui.find({ type: 'Code' })).toBeUndefined()
@@ -115,7 +143,6 @@ for (const surface of ['terminal', 'desktop'] as const) {
   })
 
   test(`${surface}: a group without shell calls is left alone`, async ($, on) => {
-    mock.store(on, {})
     const seen: boolean[] = []
     on('ui.render', ($$, e) => {
       if (e.component === 'ToolGroup') seen.push(e.props.isExpanded)
@@ -127,20 +154,26 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await ui.unmount()
   })
 
-  test(`${surface}: a group of only shell calls is unfolded into rows`, async ($, on) => {
-    mock.store(on, {})
-    const seen: boolean[] = []
-    on('ui.render', ($$, e) => {
-      if (e.component === 'ToolGroup') seen.push(e.props.isExpanded)
-      return ENGINE_ROW
-    })
+  test(`${surface}: a folded group of shell calls is drawn as folded commands`, async ($, on) => {
+    on('ui.render', () => ENGINE_ROW)
     const ui = await $.ui.mount({ ...group([SEQ]), surface })
-    expect(seen).toEqual([true])
+    expect(await ui.find({ text: 'engine row' })).toBeUndefined()
+    expect((await ui.find({ type: 'Code' }))?.props).toMatchObject({ source: 'seq 1 8' })
+    expect(await ui.find({ text: 'line 5' })).toBeDefined()
+    expect(await ui.find({ text: 'line 6' })).toBeUndefined()
+    expect(await ui.find({ text: '… +3 lines (click to expand)' })).toBeDefined()
     await ui.unmount()
   })
 
-  test(`${surface}: a mixed group keeps the engine's line and adds the shell rows`, async ($, on) => {
-    mock.store(on, {})
+  test(`${surface}: a folded group cuts a long command and counts its lines`, async ($, on) => {
+    on('ui.render', () => ENGINE_ROW)
+    const ui = await $.ui.mount({ ...group([LONG]), surface })
+    expect((await ui.find({ type: 'Code' }))?.props?.source).toBe(LONG_COMMAND.split('\n').slice(0, 10).join('\n'))
+    expect(await ui.find({ text: '… +4 lines (click to expand)' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test(`${surface}: a folded mixed group keeps the engine's line above the commands`, async ($, on) => {
     const seen: boolean[] = []
     on('ui.render', ($$, e) => {
       if (e.component === 'ToolGroup') seen.push(e.props.isExpanded)
@@ -150,71 +183,20 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(seen).toEqual([false])
     expect(await ui.find({ text: 'engine row' })).toBeDefined()
     expect((await ui.find({ type: 'Code' }))?.props).toMatchObject({ source: 'seq 1 8' })
-    expect(await ui.find({ text: 'line 5' })).toBeDefined()
-    expect(await ui.find({ text: 'line 6' })).toBeUndefined()
-    expect(await ui.find({ text: '… +3 lines' })).toBeDefined()
-    expect(await ui.find({ type: 'Button' })).toBeUndefined()
+    expect(await ui.find({ text: '… +3 lines (click to expand)' })).toBeDefined()
     await ui.unmount()
   })
 
-  test(`${surface}: a row of an unfolded group folds its output behind a button`, async ($, on) => {
-    const store = memoryStore(on, {})
-    on('ui.render', () => ENGINE_ROW)
-    const unfolded = await $.ui.mount({ ...group([SEQ]), surface })
-    const ui = await $.ui.mount({ ...row('Bash', SEQ.input, { output: SEQ.output }), surface })
-    expect(await ui.find({ text: 'line 5' })).toBeDefined()
-    expect(await ui.find({ text: 'line 6' })).toBeUndefined()
-    expect((await ui.find({ type: 'Button' }))?.props).toMatchObject({ label: '… +3 lines' })
-
-    await ui.press({ key: 'toggle-toolu_1' })
-    expect(await ui.find({ text: 'line 8' })).toBeDefined()
-    expect((await ui.find({ type: 'Button' }))?.props).toMatchObject({ label: 'show less' })
-    expect(store.get('expanded')).toEqual(['toolu_1'])
-
-    await ui.press({ key: 'toggle-toolu_1' })
-    expect(await ui.find({ text: 'line 6' })).toBeUndefined()
-    expect(store.get('expanded')).toEqual([])
+  test(`${surface}: an unfolded group is the engine's, which draws each call as a row`, async ($, on) => {
+    const seen: boolean[] = []
+    on('ui.render', ($$, e) => {
+      if (e.component === 'ToolGroup') seen.push(e.props.isExpanded)
+      return ENGINE_ROW
+    })
+    const ui = await $.ui.mount({ ...group([SEQ], true), surface })
+    expect(seen).toEqual([true])
+    expect(await ui.find({ text: 'engine row' })).toBeDefined()
+    expect(await ui.find({ type: 'Code' })).toBeUndefined()
     await ui.unmount()
-    await unfolded.unmount()
-  })
-
-  test(`${surface}: unfolded rows are remembered across sessions`, async ($, on) => {
-    mock.store(on, { expanded: ['toolu_1'] })
-    on('ui.render', () => ENGINE_ROW)
-    on('session.start', () => ({ cwd: '/work' }))
-    await $.session.start({ cwd: '/work', surface, isInteractive: true })
-    const unfolded = await $.ui.mount({ ...group([SEQ]), surface })
-    const ui = await $.ui.mount({ ...row('Bash', SEQ.input, { output: SEQ.output }), surface })
-    expect(await ui.find({ text: 'line 8' })).toBeDefined()
-    await ui.unmount()
-    await unfolded.unmount()
-  })
-
-  test(`${surface}: a long command is folded with the output`, async ($, on) => {
-    mock.store(on, {})
-    on('ui.render', () => ENGINE_ROW)
-    const command = Array.from({ length: 14 }, (_, n) => `echo ${n + 1}`).join('\n')
-    const call = { tool_use_id: 'toolu_1', tool: 'Bash', input: { command }, output: { stdout: 'ok', stderr: '' } }
-    const unfolded = await $.ui.mount({ ...group([call]), surface })
-    const ui = await $.ui.mount({ ...row('Bash', call.input, { output: call.output }), surface })
-    expect((await ui.find({ type: 'Code' }))?.props?.source).toBe(command.split('\n').slice(0, 10).join('\n'))
-    expect((await ui.find({ type: 'Button' }))?.props).toMatchObject({ label: '… +4 lines' })
-    await ui.press({ key: 'toggle-toolu_1' })
-    expect((await ui.find({ type: 'Code' }))?.props?.source).toBe(command)
-    await ui.unmount()
-    await unfolded.unmount()
-  })
-
-  test(`${surface}: a call without output says so, a running one says it runs`, async ($, on) => {
-    mock.store(on, {})
-    on('ui.render', () => ENGINE_ROW)
-    const quiet = { tool_use_id: 'toolu_1', tool: 'Bash', input: { command: 'true' }, output: { stdout: '', stderr: '' } }
-    const unfolded = await $.ui.mount({ ...group([quiet]), surface })
-    const ui = await $.ui.mount({ ...row('Bash', quiet.input, { output: quiet.output }), surface })
-    expect(await ui.find({ text: '(no output)' })).toBeDefined()
-    await ui.redraw({ tool_use_id: 'toolu_1', tool: 'Bash', input: quiet.input, ...DONE, isRunning: true })
-    expect(await ui.find({ text: 'Running…' })).toBeDefined()
-    await ui.unmount()
-    await unfolded.unmount()
   })
 }
