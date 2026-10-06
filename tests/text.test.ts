@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { cells, chunks, layout, lineCount, outputLines, takeLines, visible } from '../hooks/text'
+import { cells, chunks, findLinks, sniffLanguage, layout, lineCount, linkify, linkRows, linkTarget, outputLines, takeLines, visible } from '../hooks/text'
 import type { Block } from '../hooks/text'
 
 const shape = (blocks: Block[]) =>
@@ -165,5 +165,94 @@ describe('text', () => {
 
   test('an empty text is still an element', async () => {
     expect(chunks('')).toEqual([' '])
+  })
+})
+
+describe('linkTarget', () => {
+  test('a Windows path becomes a file URL with escaped spaces and parentheses', async () => {
+    expect(linkTarget('C:\\Program Files (x86)\\a#b.txt')).toBe('file:///C:/Program%20Files%20%28x86%29/a%23b.txt')
+  })
+
+  test('a UNC path keeps its host', async () => {
+    expect(linkTarget('\\\\server\\share\\a.txt')).toBe('file://server/share/a.txt')
+  })
+
+  test('a POSIX path and a URL', async () => {
+    expect(linkTarget('/home/me/a b.md')).toBe('file:///home/me/a%20b.md')
+    expect(linkTarget('https://example.com/wiki/A_(b)')).toBe('https://example.com/wiki/A_%28b%29')
+  })
+})
+
+describe('findLinks', () => {
+  const targets = (text: string) => findLinks(text, { home: 'C:\\Users\\me' }).map(one => one.target)
+
+  test('paths and URLs are found, trailing punctuation is not part of them', async () => {
+    expect(targets('node "C:\\a\\run.mjs" 2>&1; see https://x.org/a. or /etc/hosts, ~/.claude/x.md')).toEqual([
+      'C:\\a\\run.mjs',
+      'https://x.org/a',
+      '/etc/hosts',
+      'C:\\Users\\me/.claude/x.md',
+    ])
+  })
+
+  test('flags, fractions, drive-less words and URL paths are not paths', async () => {
+    expect(targets('cmd /c dir 1/2/3 and/or $env:HOME -NotMatch a|b')).toEqual([])
+    expect(targets('https://example.com/a/b')).toEqual(['https://example.com/a/b'])
+  })
+
+  test('without a home directory a ~ path is left alone', async () => {
+    expect(findLinks('cat ~/.zshrc', {})).toEqual([])
+  })
+})
+
+describe('sniffLanguage', () => {
+  test('a text file is sniffed by its content, a known extension is left to the highlighter', async () => {
+    expect(sniffLanguage('C:\\t\\b1.output', '{"a": 1}')).toBe('json')
+    expect(sniffLanguage('/t/page.log', '<html></html>')).toBe('xml')
+    expect(sniffLanguage('/t/session.txt', 'hello\n$ ls -la\nx')).toBe('shell')
+    expect(sniffLanguage('/t/LICENSE', 'MIT License')).toBeUndefined()
+    expect(sniffLanguage('/t/a.json', '{"a": 1}')).toBeUndefined()
+    expect(sniffLanguage('/t/broken.output', '{ not json')).toBeUndefined()
+  })
+})
+
+describe('linkify', () => {
+  test('a path in text and a path filling a code span become links; other code is kept', async () => {
+    expect(linkify('Open C:\\a\\b.md or `/etc/hosts`, not `ls /etc/x/y`', {})).toBe(
+      'Open [C:\\\\a\\\\b\\.md](file:///C:/a/b.md) or [/etc/hosts](file:///etc/hosts), not `ls /etc/x/y`',
+    )
+  })
+
+  test('fences, existing links and bare URLs stay as written', async () => {
+    const text = '```\ncat /etc/hosts\n```\n[here](/a/b) https://x.org/a'
+    expect(linkify(text, {})).toBe(text)
+  })
+})
+
+describe('links in commands and output', () => {
+  test('a command line with a path is split into a linked piece', async () => {
+    const blocks = layout('node "C:\\a\\run.mjs" x', 'powershell', 80, {})
+    expect(blocks).toEqual([
+      {
+        kind: 'row',
+        pieces: [
+          { source: 'node "', language: 'powershell' },
+          { source: 'C:\\a\\run.mjs', language: 'powershell', link: 'C:\\a\\run.mjs' },
+          { source: '" x', language: 'powershell' },
+        ],
+      },
+    ])
+  })
+
+  test('a path wider than the row is wrapped and each part keeps the link', async () => {
+    const rows = linkRows('/aaaa/bbbb/cccc', 8, {}) ?? []
+    expect(rows.map(row => row.map(piece => [piece.source, piece.link]))).toEqual([
+      [['/aaaa/bb', '/aaaa/bbbb/cccc']],
+      [['bb/cccc', '/aaaa/bbbb/cccc']],
+    ])
+  })
+
+  test('an output line without a path is not split', async () => {
+    expect(linkRows('total 12', 80, {})).toBeUndefined()
   })
 })

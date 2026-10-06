@@ -1,5 +1,5 @@
 import type { RenderElement } from 'claude-code'
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 
 const ENGINE_ROW: RenderElement = { type: 'Text', props: {}, children: ['engine row'] }
 const VIEWPORT = { columns: 100, rows: 30, isFullscreen: true }
@@ -40,6 +40,48 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect((await ui.find({ type: 'Code' }))?.props).toMatchObject({ source: 'cd ~/.claude && ls -la', language: 'bash' })
     expect(await ui.find({ text: 'List' })).toBeDefined()
     expect(await ui.find({ text: 'engine row' })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test(`${surface}: a command rests dim and is revealed in full colour over it on hover`, async ($, on) => {
+    on('ui.render', () => ENGINE_ROW)
+    const command = "node <<'EOF'\nconsole.log(1)\nEOF"
+    const ui = await $.ui.mount({ ...row('Bash', { command }), surface })
+    const fences = (await ui.findAll({ type: 'Markdown' })).map(fence => fence.props)
+    expect(fences).toEqual([
+      { dimColor: true, text: "```bash\nnode <<'EOF'\n```" },
+      { dimColor: true, text: '```javascript\nconsole.log(1)\n```' },
+      { dimColor: true, text: '```bash\nEOF\n```' },
+    ])
+    const overlay = (await ui.findAll({ type: 'Box' })).find(box => box.props.display === 'none')
+    expect(overlay?.props).toMatchObject({ position: 'absolute', top: 0, left: 0 })
+    expect(JSON.stringify(overlay?.children)).toContain('console.log(1)')
+    await ui.unmount()
+  })
+
+  test(`${surface}: outside fullscreen, where nothing hovers, a command stays in full colour`, async ($, on) => {
+    on('ui.render', () => ENGINE_ROW)
+    const ui = await $.ui.mount({ ...row('Bash', { command: 'seq 1 8' }), viewport: { ...VIEWPORT, isFullscreen: false }, surface })
+    expect(await ui.find({ type: 'Markdown' })).toBeUndefined()
+    expect((await ui.find({ type: 'Code' }))?.props).toMatchObject({ source: 'seq 1 8' })
+    expect((await ui.findAll({ type: 'Box' })).some(box => box.props.display === 'none')).toBe(false)
+    await ui.unmount()
+  })
+
+  test(`${surface}: a line too long for one fence is split the same way in the dim and the full copy`, async ($, on) => {
+    on('ui.render', () => ENGINE_ROW)
+    const ui = await $.ui.mount({ ...row('Bash', { command: `echo ${'x'.repeat(9950)}` }), surface })
+    const dim = (await ui.findAll({ type: 'Markdown' })).map(fence => String(fence.props.text).split('\n')[1])
+    const full = (await ui.findAll({ type: 'Code' })).map(code => code.props.source)
+    expect(dim).toEqual(full)
+    expect(full.length).toBe(2)
+    await ui.unmount()
+  })
+
+  test(`${surface}: the dim fence is longer than any run of backticks in the command`, async ($, on) => {
+    on('ui.render', () => ENGINE_ROW)
+    const ui = await $.ui.mount({ ...row('PowerShell', { command: 'Write-Host "```a`tb"' }), surface })
+    expect((await ui.find({ type: 'Markdown' }))?.props?.text).toBe('````powershell\nWrite-Host "```a`tb"\n````')
     await ui.unmount()
   })
 
@@ -136,7 +178,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
 
   test(`${surface}: other tools keep the engine's row`, async ($, on) => {
     on('ui.render', () => ENGINE_ROW)
-    const ui = await $.ui.mount({ ...row('Read', READ.input), surface })
+    const ui = await $.ui.mount({ ...row('Glob', { pattern: '*.md' }), surface })
     expect(await ui.find({ type: 'Code' })).toBeUndefined()
     expect(await ui.find({ text: 'engine row' })).toBeDefined()
     await ui.unmount()
@@ -184,6 +226,124 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(await ui.find({ text: 'engine row' })).toBeDefined()
     expect((await ui.find({ type: 'Code' }))?.props).toMatchObject({ source: 'seq 1 8' })
     expect(await ui.find({ text: '… +3 lines (click to expand)' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test(`${surface}: a Read row draws its path as a link that opens the file`, async ($, on) => {
+    on('ui.render', () => ENGINE_ROW)
+    const opened: string[][] = []
+    on('process.run', ($$, e) => {
+      opened.push([...e.argv])
+      return { value: { exitCode: 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    })
+    const ui = await $.ui.mount({ ...row('Read', { file_path: 'C:\\work\\a (1).md', offset: 1, limit: 5 }), surface })
+    const head = await ui.find({ type: 'Markdown' })
+    expect(head?.props?.text).toBe('**Read**([C:\\\\work\\\\a \\(1\\)\\.md](file:///C:/work/a%20%281%29.md) · lines 1\\-5)')
+    expect(await ui.find({ text: 'engine row' })).toBeUndefined()
+    await ui.press({ key: 'path-toolu_1', link: { href: 'file:///C:/work/a%20%281%29.md' } })
+    expect(opened).toEqual([['explorer.exe', 'C:\\work\\a (1).md']])
+    await ui.unmount()
+  })
+
+  test(`${surface}: a path in a command is a link that opens the file`, async ($, on) => {
+    on('ui.render', () => ENGINE_ROW)
+    const opened: string[][] = []
+    on('process.run', ($$, e) => {
+      opened.push([...e.argv])
+      return { value: { exitCode: 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    })
+    const ui = await $.ui.mount({ ...row('PowerShell', { command: 'node "C:\\a\\run.mjs"' }), surface })
+    expect((await ui.find({ type: 'Markdown', key: 'link-toolu_1-0' }))?.props?.text).toBe('[C:\\\\a\\\\run\\.mjs](file:///C:/a/run.mjs)')
+    await ui.press({ key: 'link-toolu_1-0', link: { href: 'file:///C:/a/run.mjs' } })
+    expect(opened).toEqual([['explorer.exe', 'C:\\a\\run.mjs']])
+    await ui.unmount()
+  })
+
+  test(`${surface}: a ~ path in a reply is a link that opens it under the home directory`, async ($, on) => {
+    on('ui.render', () => ENGINE_ROW)
+    mock.env(on, { USERPROFILE: 'C:\\Users\\me' })
+    on('session.start', () => ({ cwd: 'C:\\work' }))
+    const opened: string[][] = []
+    on('process.run', ($$, e) => {
+      opened.push([...e.argv])
+      return { value: { exitCode: 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    })
+    await $.session.start({ surface, isInteractive: true, cwd: 'C:\\work' })
+    const props = { text: 'Repo: `~/Documents/source/x`', isFirstOfReply: true }
+    const ui = await $.ui.mount({ plugin: 'shell-highlight', component: 'AssistantMessage', requestId: 'msg_1', viewport: VIEWPORT, props, surface })
+    expect((await ui.find({ type: 'Markdown' }))?.props?.text).toBe('Repo: [\\~/Documents/source/x](file:///C:/Users/me/Documents/source/x)')
+    await ui.press({ key: 'reply-msg_1', link: { href: 'file:///C:/Users/me/Documents/source/x' } })
+    expect(opened).toEqual([['explorer.exe', 'C:\\Users\\me\\Documents\\source\\x']])
+    await ui.unmount()
+  })
+
+  test(`${surface}: a reply without paths is the engine's`, async ($, on) => {
+    on('ui.render', () => ENGINE_ROW)
+    const props = { text: 'Nothing to see', isFirstOfReply: true }
+    const ui = await $.ui.mount({ plugin: 'shell-highlight', component: 'AssistantMessage', requestId: 'msg_1', viewport: VIEWPORT, props, surface })
+    expect(await ui.find({ text: 'engine row' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test(`${surface}: a Windows folder is opened through PowerShell so its window comes to the front`, async ($, on) => {
+    on('ui.render', () => ENGINE_ROW)
+    on('fs.stat', () => ({ value: { kind: 'dir', size: 0, mtimeMs: 0, isLink: false } }))
+    const opened: string[][] = []
+    on('process.run', ($$, e) => {
+      opened.push([...e.argv])
+      return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    })
+    const ui = await $.ui.mount({ ...row('PowerShell', { command: 'dir C:\\work\\here' }), surface })
+    await ui.press({ key: 'link-toolu_1-0', link: { href: 'file:///C:/work/here' } })
+    expect(opened.map(argv => argv[0])).toEqual(['powershell.exe'])
+    expect(opened[0]?.[4]).toContain("$p = 'C:\\work\\here'")
+    await ui.unmount()
+  })
+
+  test(`${surface}: Edit, Write and WebFetch rows draw their target as a link`, async ($, on) => {
+    on('ui.render', () => ENGINE_ROW)
+    const update = await $.ui.mount({ ...row('Edit', { file_path: '/tmp/x.ts', old_string: 'a', new_string: 'b' }), surface })
+    expect((await update.find({ type: 'Markdown' }))?.props?.text).toBe('**Update**([/tmp/x\\.ts](file:///tmp/x.ts))')
+    await update.unmount()
+    const fetch = await $.ui.mount({ ...row('WebFetch', { url: 'https://example.com/a', prompt: 'p' }), surface })
+    expect((await fetch.find({ type: 'Markdown' }))?.props?.text).toBe('**Fetch**([https://example\\.com/a](https://example.com/a))')
+    await fetch.unmount()
+  })
+
+  test(`${surface}: a click on a Read result shows the file and a second one folds it`, async ($, on) => {
+    on('ui.render', () => ENGINE_ROW)
+    const output = { type: 'text', file: { filePath: '/w/a.py', content: 'x = 1\ny = 2\n', numLines: 2, startLine: 3, totalLines: 9 } }
+    const result = { tool_use_id: 'toolu_1', tool: 'Read', output, isErrored: false }
+    const ui = await $.ui.mount({ plugin: 'shell-highlight', component: 'ToolResult', requestId: 'toolu_1', viewport: VIEWPORT, props: result, surface })
+    expect((await ui.find({ type: 'Markdown' }))?.props?.text).toBe('[Read **2** lines](file:///w/a.py)')
+    expect(await ui.find({ type: 'Code' })).toBeUndefined()
+    await ui.press({ key: 'read-toolu_1', link: { href: 'file:///w/a.py' } })
+    expect((await ui.find({ type: 'Code' }))?.props).toMatchObject({ source: 'x = 1\ny = 2', path: '/w/a.py', startLine: 3 })
+    expect(await ui.find({ text: '(click to fold)' })).toBeDefined()
+    await ui.press({ key: 'read-toolu_1', link: { href: 'file:///w/a.py' } })
+    expect(await ui.find({ type: 'Code' })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test(`${surface}: a Read row of an unfolded group shows the file without a toggle`, async ($, on) => {
+    on('ui.render', () => ENGINE_ROW)
+    const output = { type: 'text', file: { filePath: '/w/a.py', content: 'x = 1', numLines: 1, startLine: 1, totalLines: 1 } }
+    const input = { file_path: '/w/a.py' }
+    const unfolded = await $.ui.mount({ ...group([{ tool_use_id: 'toolu_1', tool: 'Read', input, output }], true), surface })
+    const ui = await $.ui.mount({ ...row('Read', input, { output }), surface })
+    expect((await ui.find({ type: 'Code' }))?.props).toMatchObject({ source: 'x = 1', path: '/w/a.py' })
+    expect(await ui.find({ text: '(click to fold)' })).toBeUndefined()
+    await ui.unmount()
+    await unfolded.unmount()
+  })
+
+  test(`${surface}: outside fullscreen a Read result is plain text`, async ($, on) => {
+    on('ui.render', () => ENGINE_ROW)
+    const output = { type: 'text', file: { filePath: '/w/a.py', content: 'x = 1', numLines: 1, startLine: 1, totalLines: 1 } }
+    const result = { tool_use_id: 'toolu_1', tool: 'Read', output, isErrored: false }
+    const ui = await $.ui.mount({ plugin: 'shell-highlight', component: 'ToolResult', requestId: 'toolu_1', viewport: { ...VIEWPORT, isFullscreen: false }, props: result, surface })
+    expect((await ui.find({ type: 'Markdown' }))?.props?.text).toBe('Read **1** line')
+    expect(await ui.find({ text: '(click to show)' })).toBeUndefined()
     await ui.unmount()
   })
 

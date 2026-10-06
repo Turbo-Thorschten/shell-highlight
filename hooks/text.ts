@@ -1,6 +1,10 @@
 export type Shell = 'bash' | 'powershell'
 
-export type Piece = { source: string; language?: string; path?: string }
+export type Piece = { source: string; language?: string; path?: string; link?: string }
+
+export type Links = { home?: string }
+
+type Found = { start: number; end: number; target: string }
 
 export type Block = { kind: 'code'; piece: Piece } | { kind: 'row'; pieces: Piece[] }
 
@@ -55,7 +59,9 @@ const REDIRECT = /(?:>>?|\btee(?:[ \t]+-a)?|\b(?:Set-Content|Add-Content|Out-Fil
 const ANSI = /\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\)|[@-Z\\-_])/g
 const CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f]/g
 const WIDE = /[\u{1100}-\u{115f}\u{2e80}-\u{a4cf}\u{ac00}-\u{d7a3}\u{f900}-\u{faff}\u{fe30}-\u{fe4f}\u{ff00}-\u{ff60}\u{ffe0}-\u{ffe6}\u{1f300}-\u{1faff}\u{20000}-\u{3fffd}]/u
-const UNSURE_WIDTH = /[\u{300}-\u{36f}\u{483}-\u{489}\u{591}-\u{5c7}\u{610}-\u{61a}\u{64b}-\u{65f}\u{900}-\u{dff}\u{e31}-\u{e4e}\u{200b}-\u{200f}\u{2028}-\u{202e}\u{2060}-\u{206f}\u{2600}-\u{27bf}\u{fe00}-\u{fe0f}\u{1f1e6}-\u{1f1ff}\u{e0000}-\u{e0fff}]/u
+const URL_LINK = /\bhttps?:\/\/[^\s"'`<>]+/g
+const PATH_LINK = /(?<![\w.~/\\:$-])(?:[A-Za-z]:[\\/]|\\\\[\w.$-]+\\|~[\\/]|\/(?=[\w.@+-]+\/))[^\s"'`<>|*?()[\]{}]*/g
+const UNSURE_WIDTH =/[\u{300}-\u{36f}\u{483}-\u{489}\u{591}-\u{5c7}\u{610}-\u{61a}\u{64b}-\u{65f}\u{900}-\u{dff}\u{e31}-\u{e4e}\u{200b}-\u{200f}\u{2028}-\u{202e}\u{2060}-\u{206f}\u{2600}-\u{27bf}\u{fe00}-\u{fe0f}\u{1f1e6}-\u{1f1ff}\u{e0000}-\u{e0fff}]/u
 
 export function cells(text: string): number {
   let width = 0
@@ -186,7 +192,7 @@ function isSameLanguage(a: Piece, b: Piece): boolean {
   return a.language === b.language && a.path === b.path
 }
 
-export function layout(command: string, shell: Shell, columns: number): Block[] {
+export function layout(command: string, shell: Shell, columns: number, links?: Links): Block[] {
   const pieces: Piece[] = []
   let at = 0
   for (const span of spans(command, shell)) {
@@ -211,12 +217,13 @@ export function layout(command: string, shell: Shell, columns: number): Block[] 
   const blocks: Block[] = []
   for (const line of lines) {
     const filled = line.filter(piece => piece.source !== '')
-    const parts = filled.length > 0 ? filled : line.slice(0, 1)
+    const found = links === undefined ? filled : splitLinks(filled, links)
+    const parts = found.length > 0 ? found : line.slice(0, 1)
     const single: Piece =
-      parts.length === 1 && parts[0] !== undefined
+      parts.length === 1 && parts[0] !== undefined && parts[0].link === undefined
         ? parts[0]
         : { source: parts.map(piece => piece.source).join(''), language: shell }
-    if (parts.length > 1 && !UNSURE_WIDTH.test(single.source)) {
+    if ((parts.length > 1 || parts[0]?.link !== undefined) && !UNSURE_WIDTH.test(single.source)) {
       for (const pieces of wrap(parts, columns)) blocks.push({ kind: 'row', pieces })
       continue
     }
@@ -251,15 +258,15 @@ export function takeLines(blocks: Block[], count: number): Block[] {
   return taken
 }
 
-export function chunks(text: string): string[] {
+export function chunks(text: string, max = MAX_ELEMENT_CHARS): string[] {
   const out: string[] = []
   let current: string | null = null
   for (const line of text.split('\n')) {
-    for (let from = 0; from === 0 || from < line.length; from += MAX_ELEMENT_CHARS) {
-      const part = line.slice(from, from + MAX_ELEMENT_CHARS)
+    for (let from = 0; from === 0 || from < line.length; from += max) {
+      const part = line.slice(from, from + max)
       if (current === null) {
         current = part
-      } else if (current.length + 1 + part.length > MAX_ELEMENT_CHARS) {
+      } else if (current.length + 1 + part.length > max) {
         out.push(current)
         current = part
       } else {
@@ -269,6 +276,110 @@ export function chunks(text: string): string[] {
   }
   out.push(current ?? '')
   return out.map(chunk => (chunk === '' ? ' ' : chunk))
+}
+
+function trimLink(raw: string): string {
+  let text = raw.replace(/[.,;:!?'"]+$/, '')
+  while (text.endsWith(')') && text.split('(').length < text.split(')').length) text = text.slice(0, -1).replace(/[.,;:!?'"]+$/, '')
+  return text
+}
+
+export function findLinks(text: string, links: Links): Found[] {
+  const found: Found[] = []
+  for (const pattern of [URL_LINK, PATH_LINK]) {
+    for (const match of text.matchAll(pattern)) {
+      const raw = trimLink(match[0])
+      const start = match.index
+      const end = start + raw.length
+      if (raw.length < 3 || found.some(one => start < one.end && end > one.start)) continue
+      if (/^~[\\/]/.test(raw) && links.home === undefined) continue
+      found.push({ start, end, target: /^~[\\/]/.test(raw) ? `${links.home}${raw.slice(1)}` : raw })
+    }
+  }
+  return found.sort((a, b) => a.start - b.start)
+}
+
+function splitLinks(pieces: Piece[], links: Links): Piece[] {
+  const out: Piece[] = []
+  for (const piece of pieces) {
+    let at = 0
+    for (const one of findLinks(piece.source, links)) {
+      if (one.start > at) out.push({ ...piece, source: piece.source.slice(at, one.start) })
+      out.push({ ...piece, source: piece.source.slice(one.start, one.end), link: one.target })
+      at = one.end
+    }
+    if (at < piece.source.length || at === 0) out.push({ ...piece, source: piece.source.slice(at) })
+  }
+  return out
+}
+
+export function linkRows(line: string, columns: number, links: Links): Piece[][] | undefined {
+  if (UNSURE_WIDTH.test(line)) return undefined
+  const pieces = splitLinks([{ source: line }], links)
+  return pieces.some(piece => piece.link !== undefined) ? wrap(pieces, columns) : undefined
+}
+
+export function linkify(markdown: string, links: Links): string {
+  const link = (label: string, target: string) => `[${label}](${linkTarget(target)})`
+  const plain = (text: string) => {
+    let out = ''
+    let at = 0
+    for (const one of findLinks(text, links)) {
+      if (/^https?:/i.test(one.target)) continue
+      out += `${text.slice(at, one.start)}${link(escapeMarkdown(text.slice(one.start, one.end)), one.target)}`
+      at = one.end
+    }
+    return out + text.slice(at)
+  }
+  let out = ''
+  let at = 0
+  for (const match of markdown.matchAll(/```[\s\S]*?(?:```|$)|`[^`\n]+`|\[[^\]\n]*\]\([^)\n]*\)|<https?:[^>\s]+>/g)) {
+    out += plain(markdown.slice(at, match.index))
+    const span = /^`([^`]+)`$/.exec(match[0])?.[1]
+    const found = span === undefined ? [] : findLinks(span, links)
+    const whole = found.length === 1 && found[0]?.start === 0 && found[0].end === span?.length ? found[0] : undefined
+    out += whole === undefined || span === undefined ? match[0] : link(escapeMarkdown(span), whole.target)
+    at = match.index + match[0].length
+  }
+  return out + plain(markdown.slice(at))
+}
+
+export function escapeMarkdown(text: string): string {
+  return text.replace(/[\\`*_{}[\]()<>#+\-.!|~]/g, ch => `\\${ch}`)
+}
+
+export function isWindowsPath(path: string): boolean {
+  return /^(?:[A-Za-z]:[\\/]|\\\\)/.test(path)
+}
+
+export function linkTarget(target: string): string {
+  const parens = (url: string) => url.replace(/\(/g, '%28').replace(/\)/g, '%29')
+  if (/^https?:\/\//i.test(target)) return parens(target)
+  const slashed = target.replace(/\\/g, '/')
+  const rooted = slashed.startsWith('//') ? slashed.slice(2) : slashed.startsWith('/') ? slashed.slice(1) : slashed
+  return `file://${slashed.startsWith('//') ? '' : '/'}${parens(encodeURI(rooted).replace(/[?#]/g, encodeURIComponent))}`
+}
+
+export function sniffLanguage(path: string, content: string): string | undefined {
+  if (!/(?:\.(?:output|log|txt|out)|(?:^|[\\/])[^.\\/]+)$/i.test(path)) return undefined
+  const text = content.trimStart()
+  if (/^[{[]/.test(text)) {
+    try {
+      JSON.parse(content)
+      return 'json'
+    } catch {}
+  }
+  if (/^<[!?A-Za-z]/.test(text)) return 'xml'
+  if (/^(?:\$|PS [^>\n]*>|❯) /m.test(content)) return 'shell'
+  return undefined
+}
+
+export function fromLinkTarget(href: string): string {
+  if (!/^file:/i.test(href)) return href
+  const url = new URL(href)
+  const path = decodeURIComponent(url.pathname)
+  if (url.host !== '') return `\\\\${url.host}${path.replace(/\//g, '\\')}`
+  return /^\/[A-Za-z]:/.test(path) ? path.slice(1).replace(/\//g, '\\') : path
 }
 
 export function outputLines(output: unknown): string[] {
