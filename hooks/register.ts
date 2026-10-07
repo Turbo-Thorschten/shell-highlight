@@ -14,7 +14,6 @@ const PATH_TOOLS: Record<string, { label: string; field: string }> = {
 const FOLDED_COMMAND_LINES = 10
 const FOLDED_OUTPUT_LINES = 5
 const FOLD_SLACK = 1
-const FENCED_CHARS = 9900
 const DIM = 'inactive'
 const LIT = { color: 'text' }
 
@@ -62,10 +61,6 @@ function draw(
   const columns = Math.max(20, (viewport?.columns ?? 80) - 6)
   const code = (piece: Piece, source: string) =>
     Code({ source, ...(piece.language !== undefined ? { language: piece.language } : {}), ...(piece.path !== undefined ? { path: piece.path } : {}) })
-  const fence = (piece: Piece, source: string) => {
-    const ticks = '`'.repeat(Math.max(3, ...[...source.matchAll(/`+/g)].map(run => run[0].length + 1)))
-    return Markdown({ dimColor: true, text: `${ticks}${piece.language ?? piece.path?.split('.').pop() ?? ''}\n${source}\n${ticks}` })
-  }
   const dim = (text: string) => Text({ color: DIM, hover: LIT, children: [text] })
   let linkCount = 0
   const cell = (piece: Piece, drawn: (piece: Piece) => ReturnType<typeof Text>) => {
@@ -106,38 +101,14 @@ function draw(
   const blocks = layout(shown.command, shown.shell, columns, links())
   const commandLines = lineCount(blocks)
   const isCommandCut = isFolded && commandLines > FOLDED_COMMAND_LINES + FOLD_SLACK
-  const full = []
-  const rest = []
+  const body = []
   for (const block of isCommandCut ? takeLines(blocks, FOLDED_COMMAND_LINES) : blocks) {
     if (block.kind === 'row') {
-      full.push(Box({ flexDirection: 'row', children: block.pieces.map(piece => cell(piece, one => code(one, one.source))) }))
-      rest.push(
-        Box({
-          flexDirection: 'row',
-          children: block.pieces.map(piece => Box({ flexShrink: 0, flexGrow: 0, width: cells(piece.source), children: [fence(piece, piece.source)] })),
-        }),
-      )
+      body.push(Box({ flexDirection: 'row', children: block.pieces.map(piece => cell(piece, one => code(one, one.source))) }))
     } else {
-      for (const source of chunks(block.piece.source, FENCED_CHARS)) {
-        full.push(code(block.piece, source))
-        rest.push(fence(block.piece, source))
-      }
+      for (const source of chunks(block.piece.source)) body.push(code(block.piece, source))
     }
   }
-  // Code can neither dim nor hover: the dim copy keeps the room, the full one is revealed over it on hover.
-  // Outside fullscreen nothing hovers, so the command stays in full colour there.
-  const body =
-    viewport?.isFullscreen === true
-      ? [
-          Box({
-            flexDirection: 'column',
-            children: [
-              Box({ flexDirection: 'column', children: rest }),
-              Box({ position: 'absolute', top: 0, left: 0, right: 0, display: 'none', hover: { display: 'flex' }, flexDirection: 'column', children: full }),
-            ],
-          }),
-        ]
-      : full
   let hidden = isCommandCut ? commandLines - FOLDED_COMMAND_LINES : 0
   if (hidden > 0) body.push(dim('…'))
 

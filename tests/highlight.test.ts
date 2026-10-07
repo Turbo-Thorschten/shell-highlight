@@ -43,48 +43,6 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await ui.unmount()
   })
 
-  test(`${surface}: a command rests dim and is revealed in full colour over it on hover`, async ($, on) => {
-    on('ui.render', () => ENGINE_ROW)
-    const command = "node <<'EOF'\nconsole.log(1)\nEOF"
-    const ui = await $.ui.mount({ ...row('Bash', { command }), surface })
-    const fences = (await ui.findAll({ type: 'Markdown' })).map(fence => fence.props)
-    expect(fences).toEqual([
-      { dimColor: true, text: "```bash\nnode <<'EOF'\n```" },
-      { dimColor: true, text: '```javascript\nconsole.log(1)\n```' },
-      { dimColor: true, text: '```bash\nEOF\n```' },
-    ])
-    const overlay = (await ui.findAll({ type: 'Box' })).find(box => box.props.display === 'none')
-    expect(overlay?.props).toMatchObject({ position: 'absolute', top: 0, left: 0 })
-    expect(JSON.stringify(overlay?.children)).toContain('console.log(1)')
-    await ui.unmount()
-  })
-
-  test(`${surface}: outside fullscreen, where nothing hovers, a command stays in full colour`, async ($, on) => {
-    on('ui.render', () => ENGINE_ROW)
-    const ui = await $.ui.mount({ ...row('Bash', { command: 'seq 1 8' }), viewport: { ...VIEWPORT, isFullscreen: false }, surface })
-    expect(await ui.find({ type: 'Markdown' })).toBeUndefined()
-    expect((await ui.find({ type: 'Code' }))?.props).toMatchObject({ source: 'seq 1 8' })
-    expect((await ui.findAll({ type: 'Box' })).some(box => box.props.display === 'none')).toBe(false)
-    await ui.unmount()
-  })
-
-  test(`${surface}: a line too long for one fence is split the same way in the dim and the full copy`, async ($, on) => {
-    on('ui.render', () => ENGINE_ROW)
-    const ui = await $.ui.mount({ ...row('Bash', { command: `echo ${'x'.repeat(9950)}` }), surface })
-    const dim = (await ui.findAll({ type: 'Markdown' })).map(fence => String(fence.props.text).split('\n')[1])
-    const full = (await ui.findAll({ type: 'Code' })).map(code => code.props.source)
-    expect(dim).toEqual(full)
-    expect(full.length).toBe(2)
-    await ui.unmount()
-  })
-
-  test(`${surface}: the dim fence is longer than any run of backticks in the command`, async ($, on) => {
-    on('ui.render', () => ENGINE_ROW)
-    const ui = await $.ui.mount({ ...row('PowerShell', { command: 'Write-Host "```a`tb"' }), surface })
-    expect((await ui.find({ type: 'Markdown' }))?.props?.text).toBe('````powershell\nWrite-Host "```a`tb"\n````')
-    await ui.unmount()
-  })
-
   test(`${surface}: a PowerShell command is drawn as highlighted code`, async ($, on) => {
     on('ui.render', () => ENGINE_ROW)
     const ui = await $.ui.mount({ ...row('PowerShell', { command: 'Get-ChildItem -Force' }), surface })

@@ -23,7 +23,7 @@ Claude Code prints a shell command in one colour and folds a run of them into a 
   | `cat > script.py <<'EOF'`, `@'…'@ \| Set-Content data.json` | by the file's extension |
 
 - **Folded by default, one click to unfold.** A call shows up to 10 lines of its command and 5 lines of its output, then `… +N lines (click to expand)`. A click anywhere on the run of calls unfolds every command and every line of output; a second click folds them again.
-- **Hover per call.** The pointer lights up the description and output of the call under it, not the whole run. In fullscreen the command itself rests dimmed, still coloured, and turns to full colour under the pointer.
+- **Hover per call.** The pointer lights up the description and output of the call under it, not the whole run.
 - **Wrapping that keeps the colours.** An inline script wider than the terminal is wrapped at a space outside string literals, so every wrapped line is still highlighted. Wide characters (CJK, emoji) count as two cells.
 - **Status at a glance.** The dot is dim while a call runs, green when it succeeded, red when it failed or was interrupted. A running call says `Running…`, an interrupted one `Interrupted`, a silent one `(no output)`.
 - **Clean output.** Colour codes and control characters are removed from the output; in a command they are shown as visible symbols (`␛`).
@@ -84,8 +84,6 @@ Two files: [`hooks/text.ts`](hooks/text.ts) splits a command into pieces, their 
 3. **`ToolResult`**, the result block under a row. Left to Claude Code, except where the row already drew the output and for `Read`, whose line count unfolds the lines read.
 4. **`AssistantMessage`**, a block of a reply. A block with paths is drawn by the mod, with the paths as links; any other block is left to Claude Code.
 
-`Code` can neither dim nor react to the pointer, so a dimmed command is a `Markdown` code fence with `dimColor`, and the full-colour `Code` lies over it, hidden until hovered.
-
 The mod changes how rows are drawn and nothing else: the command that runs, its permission prompt and its result are untouched. `claude plugin validate` lists its engine calls: `$.ui.resolve` and `$.ui.toast` for drawing, `$.state` for the unfolded reads, `$.env.get` (`USERPROFILE`, `HOME`) to expand `~`, and `$.fs.stat` and `$.process.run` only when you click a link. It makes no network calls.
 
 It runs next to other mods. For a shell row it returns its own drawing, so a mod loaded beneath it does not draw that row.
@@ -98,9 +96,9 @@ Every behaviour above was checked on a real screen, on Claude Code 2.1.287:
 - Linux (Ubuntu under WSL 2) in tmux, fullscreen and classic mode, at 110 and 50 columns
 - pointer hover and clicks, the `ctrl+o` transcript, a running, a failed, an interrupted and a not yet approved call, 3,000 lines of output, a second mod loaded alongside
 
-Links, `Read` unfolding and the dimmed commands were checked on Claude Code 2.1.291: clicks on paths in tool rows, shell commands and replies in WezTerm on Windows, a folder's Explorer window coming to the front, and the dimmed-to-full-colour hover in tmux under WSL. They were not checked in the desktop app, VS Code or on mobile.
+Links and `Read` unfolding were checked on Claude Code 2.1.291: clicks on paths in tool rows, shell commands and replies in WezTerm on Windows, and a folder's Explorer window coming to the front. They were not checked in the desktop app, VS Code or on mobile.
 
-`claude plugin test` runs 95 tests of the splitting, wrapping, linking and drawing on the terminal and desktop surfaces.
+`claude plugin test` runs 87 tests of the splitting, wrapping, linking and drawing on the terminal and desktop surfaces.
 
 ## Development
 

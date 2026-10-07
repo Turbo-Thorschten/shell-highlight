@@ -258,15 +258,15 @@ export function takeLines(blocks: Block[], count: number): Block[] {
   return taken
 }
 
-export function chunks(text: string, max = MAX_ELEMENT_CHARS): string[] {
+export function chunks(text: string): string[] {
   const out: string[] = []
   let current: string | null = null
   for (const line of text.split('\n')) {
-    for (let from = 0; from === 0 || from < line.length; from += max) {
-      const part = line.slice(from, from + max)
+    for (let from = 0; from === 0 || from < line.length; from += MAX_ELEMENT_CHARS) {
+      const part = line.slice(from, from + MAX_ELEMENT_CHARS)
       if (current === null) {
         current = part
-      } else if (current.length + 1 + part.length > max) {
+      } else if (current.length + 1 + part.length > MAX_ELEMENT_CHARS) {
         out.push(current)
         current = part
       } else {

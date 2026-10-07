@@ -1,6 +1,6 @@
 {
   "name": "shell-highlight",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Draws Bash and PowerShell tool calls with syntax-highlighted commands, clickable paths and unfoldable reads",
   "author": { "name": "Turbo-Thorschten", "url": "https://github.com/Turbo-Thorschten" },
   "license": "MIT",
