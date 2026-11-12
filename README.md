@@ -8,7 +8,7 @@ Claude Code prints a shell command in one colour and folds a run of them into a 
 
 ## Features
 
-- **Highlighted commands.** `Bash` calls are coloured as bash, `PowerShell` calls as PowerShell.
+- **Highlighted commands, under the pointer.** `Bash` calls are coloured as bash, `PowerShell` calls as PowerShell. In the fullscreen terminal a command stands in one dim colour and takes its colours while the pointer is over its call, without moving a line; a call too large to be drawn twice is coloured at once. Everywhere else (the classic transcript, the desktop app, VS Code, mobile) it is coloured at once.
 - **Embedded languages.** A script handed to an interpreter is coloured in its own language, whether it sits in a heredoc, a PowerShell here-string or a quoted argument:
 
   | Written as | Coloured as |
@@ -24,12 +24,14 @@ Claude Code prints a shell command in one colour and folds a run of them into a 
 
 - **Folded by default, one click to unfold.** A call shows up to 10 lines of its command and 5 lines of its output, then `… +N lines (click to expand)`. A click anywhere on the run of calls unfolds every command and every line of output; a second click folds them again.
 - **Hover per call.** The pointer lights up the description and output of the call under it, not the whole run.
-- **Wrapping that keeps the colours.** An inline script wider than the terminal is wrapped at a space outside string literals, so every wrapped line is still highlighted. Wide characters (CJK, emoji) count as two cells.
+- **Wrapping that keeps the colours.** A command line wider than the terminal is wrapped at a space, outside string literals where there is one, else inside them, and a word longer than the line is cut, so every wrapped line is still highlighted. A line with characters of unsure width (combining accents, emoji sequences) is left to Claude Code to wrap. Wide characters (CJK, emoji) count as two cells.
 - **Status at a glance.** The dot is dim while a call runs, green when it succeeded, red when it failed or was interrupted. A running call says `Running…`, an interrupted one `Interrupted`, a silent one `(no output)`.
 - **Clean output.** Colour codes and control characters are removed from the output; in a command they are shown as visible symbols (`␛`).
 - **Clickable paths and URLs.** Absolute paths (`C:\…`, `\\server\…`, `/a/b…`, `~/…`) and `http(s)://` URLs are links in shell commands, shell output and Claude's replies, as are the targets in the `Read`, `Update`, `Write` and `Fetch` rows. In fullscreen one click opens them with the default program (`explorer.exe` on Windows, `xdg-open` or `open` elsewhere); a folder's Explorer window is brought to the front. A path wrapped over two lines is clickable on both.
 - **Read along.** `Read 12 lines (click to show)` unfolds the lines that were read, highlighted by the file's extension, numbered from where the read started; a second click folds them. `.output`, `.log`, `.txt` and extension-less files are coloured by their content when it is JSON, XML or a shell session. In an unfolded run the lines show at once.
-- **Everything else stays native.** Other tools keep Claude Code's rows. A run that mixes shell calls with other tools keeps its count line (`Read 1 file, ran 2 shell commands`) above the shell calls and unfolds into the engine's own rows.
+- **Everything else stays native.** In the full view other tools keep Claude Code's rows. A run that mixes shell calls with other tools keeps its count line (`Read 1 file, ran 2 shell commands`) above the shell calls and unfolds into the engine's own rows.
+- **Three views of tool calls.** `full` draws calls as described here; `one line` draws every call, of any tool, as one line (name and description or main argument) without output; `off` draws no calls at all, except one that is still running, which keeps its line until it ends. The `ctrl+o` transcript always shows every call in full. The current view is the dim `tools: full` label at the right of the prompt footer; a click on it, or `/tool-view`, switches to the next. The view lasts for the session.
+- **A key for the views.** `/tool-view` can be bound like any command, here to `ctrl+x v`, in the `Chat` block of `~/.claude/keybindings.json`: `"ctrl+x v": "command:tool-view"`.
 
 ### Where the output comes from
 
@@ -83,14 +85,17 @@ Two files: [`hooks/text.ts`](hooks/text.ts) splits a command into pieces, their 
 2. **`ToolUse`**, one row. For a shell call the hook draws the highlighted command; for `Read`, `Edit`, `Write` and `WebFetch` the name and a linked target. A row of an unfolded run also draws its output, because Claude Code draws none there.
 3. **`ToolResult`**, the result block under a row. Left to Claude Code, except where the row already drew the output and for `Read`, whose line count unfolds the lines read.
 4. **`AssistantMessage`**, a block of a reply. A block with paths is drawn by the mod, with the paths as links; any other block is left to Claude Code.
+5. **`SessionMode`**, the mode labels in the prompt footer. The mod adds its view label there as a button.
 
-The mod changes how rows are drawn and nothing else: the command that runs, its permission prompt and its result are untouched. `claude plugin validate` lists its engine calls: `$.ui.resolve` and `$.ui.toast` for drawing, `$.state` for the unfolded reads, `$.env.get` (`USERPROFILE`, `HOME`) to expand `~`, and `$.fs.stat` and `$.process.run` only when you click a link. It makes no network calls.
+In the `one line` and `off` views the first three hooks draw every call themselves and leave the result blocks empty, except in the `ctrl+o` transcript, where they draw as in the `full` view. The colours under the pointer are a second, coloured copy of each command piece, laid over the dim one and revealed by a hover; both copies come from the same pieces, so they wrap alike.
+
+The mod changes how rows are drawn and nothing else: the command that runs, its permission prompt and its result are untouched. `claude plugin validate` lists its engine calls: `$.ui.resolve` and `$.ui.toast` for drawing, `$.state` for the unfolded reads and the view, `$.command.register` for `/tool-view`, `$.env.get` (`USERPROFILE`, `HOME`) to expand `~`, and `$.fs.stat` and `$.process.run` only when you click a link. It makes no network calls.
 
 It runs next to other mods. For a shell row it returns its own drawing, so a mod loaded beneath it does not draw that row.
 
 ## Tested
 
-Every behaviour above was checked on a real screen, on Claude Code 2.1.287:
+The behaviours above were checked on a real screen. All but the links, `Read` unfolding, the colours under the pointer and the views were checked on Claude Code 2.1.287:
 
 - Windows 11 in WezTerm, `Bash` and `PowerShell` tools
 - Linux (Ubuntu under WSL 2) in tmux, fullscreen and classic mode, at 110 and 50 columns
@@ -98,7 +103,9 @@ Every behaviour above was checked on a real screen, on Claude Code 2.1.287:
 
 Links and `Read` unfolding were checked on Claude Code 2.1.291: clicks on paths in tool rows, shell commands and replies in WezTerm on Windows, and a folder's Explorer window coming to the front. They were not checked in the desktop app, VS Code or on mobile.
 
-`claude plugin test` runs 87 tests of the splitting, wrapping, linking and drawing on the terminal and desktop surfaces.
+The colours under the pointer and the three views were checked on Claude Code 2.1.321, the Windows build in tmux under WSL 2 at 100 columns: a dim command and the same rows coloured under the pointer, for one call only, with a long, a multi-line and an inline-script command; commands coloured at once in the classic transcript; the footer label, `/tool-view` and the `ctrl+x v` binding cycling the views; `one line` and `off` on shell, `Read` and `Glob` calls, a failed one and a running one; `ctrl+o` in `off`; `one line` and `off` in the classic transcript, a permission prompt in `off`, a tab in a command; an unfolded call with 109,000 characters of output, coloured at once. Not checked: a click on a link in a dim command, and the desktop app, VS Code and mobile.
+
+`claude plugin test` runs 111 tests of the splitting, wrapping, linking and drawing and of the views, on the terminal and desktop surfaces.
 
 ## Development
 

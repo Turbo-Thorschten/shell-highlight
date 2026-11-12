@@ -61,7 +61,7 @@ const CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f]/g
 const WIDE = /[\u{1100}-\u{115f}\u{2e80}-\u{a4cf}\u{ac00}-\u{d7a3}\u{f900}-\u{faff}\u{fe30}-\u{fe4f}\u{ff00}-\u{ff60}\u{ffe0}-\u{ffe6}\u{1f300}-\u{1faff}\u{20000}-\u{3fffd}]/u
 const URL_LINK = /\bhttps?:\/\/[^\s"'`<>]+/g
 const PATH_LINK = /(?<![\w.~/\\:$-])(?:[A-Za-z]:[\\/]|\\\\[\w.$-]+\\|~[\\/]|\/(?=[\w.@+-]+\/))[^\s"'`<>|*?()[\]{}]*/g
-const UNSURE_WIDTH =/[\u{300}-\u{36f}\u{483}-\u{489}\u{591}-\u{5c7}\u{610}-\u{61a}\u{64b}-\u{65f}\u{900}-\u{dff}\u{e31}-\u{e4e}\u{200b}-\u{200f}\u{2028}-\u{202e}\u{2060}-\u{206f}\u{2600}-\u{27bf}\u{fe00}-\u{fe0f}\u{1f1e6}-\u{1f1ff}\u{e0000}-\u{e0fff}]/u
+const UNSURE_WIDTH =/[\u{300}-\u{36f}\u{483}-\u{489}\u{591}-\u{5c7}\u{610}-\u{61a}\u{64b}-\u{65f}\u{900}-\u{dff}\u{e31}-\u{e4e}\u{200b}-\u{200f}\u{2028}-\u{202e}\u{2060}-\u{206f}\u{2600}-\u{27bf}\u{fe00}-\u{fe0f}\u{1f1e6}-\u{1f1ff}\u{e0000}-\u{e0fff}\u{1ab0}-\u{1aff}\u{1dc0}-\u{1dff}\u{20d0}-\u{20ff}\u{fe20}-\u{fe2f}\u{1f3fb}-\u{1f3ff}]/u
 
 export function cells(text: string): number {
   let width = 0
@@ -228,10 +228,13 @@ export function layout(command: string, shell: Shell, columns: number, links?: L
       continue
     }
     const last = blocks[blocks.length - 1]
+    const source = UNSURE_WIDTH.test(single.source)
+      ? single.source
+      : wrap([single], columns).map(row => row.map(piece => piece.source).join('')).join('\n')
     if (last?.kind === 'code' && isSameLanguage(last.piece, single)) {
-      last.piece = { ...last.piece, source: `${last.piece.source}\n${single.source}` }
+      last.piece = { ...last.piece, source: `${last.piece.source}\n${source}` }
     } else {
-      blocks.push({ kind: 'code', piece: single })
+      blocks.push({ kind: 'code', piece: { ...single, source } })
     }
   }
   return blocks

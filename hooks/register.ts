@@ -1,8 +1,9 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, RenderElement } from 'claude-code'
 
 import { cells, chunks, escapeMarkdown, fromLinkTarget, isWindowsPath, layout, lineCount, linkify, linkRows, linkTarget, outputLines, sniffLanguage, takeLines, visible } from './text'
 import type { Links, Piece, Shell } from './text'
+import type { ToolView } from '../types'
 
 const SHELLS: Record<string, Shell> = { Bash: 'bash', PowerShell: 'powershell' }
 const PATH_TOOLS: Record<string, { label: string; field: string }> = {
@@ -16,9 +17,17 @@ const FOLDED_OUTPUT_LINES = 5
 const FOLD_SLACK = 1
 const DIM = 'inactive'
 const LIT = { color: 'text' }
+const VIEWS: ToolView[] = ['full', 'line', 'off']
+const VIEW_LABELS: Record<ToolView, string> = { full: 'tools: full', line: 'tools: one line', off: 'tools: off' }
+const VIEW_COMMAND = 'tool-view'
+const SUMMARY_FIELDS = ['description', 'pattern', 'query', 'url', 'path', 'skill', 'prompt']
+// A drawing shows its first 100,000 characters and is refused past 20,000 nodes; the hover draws a command twice.
+const DRAWING_MAX_CHARS = 100000
+const DRAWING_MAX_NODES = 20000
 
 const groupRows = new Set<string>()
 const shown = atom({ plugin: 'shell-highlight', key: 'shown' } as const, [] as string[])
+const view = atom({ plugin: 'shell-highlight', key: 'view' } as const, 'full' as ToolView)
 let home: string | undefined
 
 function links(): Links {
@@ -56,11 +65,22 @@ function draw(
   isFolded: boolean,
   hasOutput: boolean,
   viewport: { columns: number; isFullscreen?: boolean } | undefined,
+  hasHover: boolean,
 ) {
   const { Box, Text, Code, Markdown } = $.ui.resolve(e)
+  const isHover = hasHover && e.surface === 'terminal' && viewport?.isFullscreen === true
   const columns = Math.max(20, (viewport?.columns ?? 80) - 6)
-  const code = (piece: Piece, source: string) =>
-    Code({ source, ...(piece.language !== undefined ? { language: piece.language } : {}), ...(piece.path !== undefined ? { path: piece.path } : {}) })
+  const code = (piece: Piece, source: string) => {
+    const lit = Code({ source, ...(piece.language !== undefined ? { language: piece.language } : {}), ...(piece.path !== undefined ? { path: piece.path } : {}) })
+    if (!isHover) return lit
+    // A hover can reveal a Box but never hide one, so the coloured copy lies absolutely over the plain one.
+    return Box({
+      children: [
+        Text({ color: DIM, children: [source] }),
+        Box({ position: 'absolute', top: 0, left: 0, right: 0, display: 'none', hover: { display: 'flex' }, children: [lit] }),
+      ],
+    })
+  }
   const dim = (text: string) => Text({ color: DIM, hover: LIT, children: [text] })
   let linkCount = 0
   const cell = (piece: Piece, drawn: (piece: Piece) => ReturnType<typeof Text>) => {
@@ -102,7 +122,8 @@ function draw(
   const commandLines = lineCount(blocks)
   const isCommandCut = isFolded && commandLines > FOLDED_COMMAND_LINES + FOLD_SLACK
   const body = []
-  for (const block of isCommandCut ? takeLines(blocks, FOLDED_COMMAND_LINES) : blocks) {
+  const drawn = isCommandCut ? takeLines(blocks, FOLDED_COMMAND_LINES) : blocks
+  for (const block of drawn) {
     if (block.kind === 'row') {
       body.push(Box({ flexDirection: 'row', children: block.pieces.map(piece => cell(piece, one => code(one, one.source))) }))
     } else {
@@ -156,6 +177,34 @@ function draw(
       Box({ flexDirection: 'column', paddingLeft: 2, children: body }),
     ],
   })
+}
+
+function stringLength(value: unknown): number {
+  if (typeof value === 'string') return value.length
+  if (value === null || typeof value !== 'object') return 0
+  return Object.values(value).reduce<number>((sum, one) => sum + stringLength(one), 0)
+}
+
+// Every string counts, props too, nested ones included (a Select's options from a mod beneath):
+// the engine counts keys as well as text, so this errs on the safe side.
+function treeSize(node: unknown): { chars: number; nodes: number } {
+  if (typeof node === 'string') return { chars: node.length, nodes: 1 }
+  if (node === null || typeof node !== 'object') return { chars: 0, nodes: 0 }
+  const element = node as { props?: Record<string, unknown>; children?: unknown[] }
+  const own = stringLength(element.props)
+  return (element.children ?? []).reduce<{ chars: number; nodes: number }>(
+    (total, child) => {
+      const one = treeSize(child)
+      return { chars: total.chars + one.chars, nodes: total.nodes + one.nodes }
+    },
+    { chars: own, nodes: 1 },
+  )
+}
+
+function withinBudget(drawing: (hasHover: boolean) => RenderElement): RenderElement {
+  const lit = drawing(true)
+  const size = treeSize(lit)
+  return size.chars <= DRAWING_MAX_CHARS && size.nodes <= DRAWING_MAX_NODES ? lit : drawing(false)
 }
 
 type PathTarget = { label: string; target: string; detail: string }
@@ -287,10 +336,64 @@ function drawReadResult($: EngineInterface, e: RenderEvent, id: string, file: Re
   })
 }
 
+function drawLine($: EngineInterface, e: RenderEvent, call: Call) {
+  const { Box, Text } = $.ui.resolve(e)
+  const shell = shellCommand(call.tool, call.input)
+  const path = pathTarget(call.tool, call.input)
+  const fields = typeof call.input === 'object' && call.input !== null ? (call.input as Record<string, unknown>) : {}
+  const named = [...SUMMARY_FIELDS.map(field => fields[field]), ...Object.values(fields)].find(
+    (value): value is string => typeof value === 'string' && value.trim() !== '',
+  )
+  const text = shell !== undefined ? shell.description || shell.command : path !== undefined ? path.target + path.detail : (named ?? '')
+  const summary = visible(text.replace(/\s+/g, ' ').trim()).slice(0, 500)
+  const children = [
+    Box({
+      flexDirection: 'row',
+      gap: 1,
+      flexShrink: 0,
+      children: [
+        Text({
+          color: call.isRunning ? DIM : call.isErrored || call.isInterrupted ? 'error' : 'success',
+          children: ['●'],
+        }),
+        Text({ bold: true, children: [path?.label ?? call.tool] }),
+      ],
+    }),
+  ]
+  if (summary !== '') children.push(Text({ color: DIM, wrap: 'truncate-end', children: [summary] }))
+  return Box({ flexDirection: 'row', gap: 1, children })
+}
+
+function nextView(current: ToolView): ToolView {
+  return VIEWS[(VIEWS.indexOf(current) + 1) % VIEWS.length] ?? 'full'
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME'))
+    await $.command
+      .register({ name: VIEW_COMMAND, description: 'Cycle how tool calls are drawn: full, one line, off', immediate: true })
+      .catch(() => undefined)
     return next(e)
+  })
+
+  on('command.run', { command: VIEW_COMMAND }, async $ => {
+    const current = await update($, view, nextView)
+    $.ui.toast(VIEW_LABELS[current])
+    return {}
+  }).catch(($, e, next) => ({ text: `/${VIEW_COMMAND} failed: ${next.error.message}` }))
+
+  on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
+    const current = await read($, view)
+    const { Box, Button } = $.ui.resolve(e)
+    const button = Button({
+      key: 'tool-view',
+      label: `🔧 ${VIEW_LABELS[current]}`,
+      plain: true,
+      dimColor: true,
+      onPress: () => void update($, view, nextView),
+    })
+    return Box({ flexDirection: 'row', children: [await next(e), button] })
   })
 
   on('ui.render', { component: 'AssistantMessage' }, ($, e, next) => {
@@ -313,7 +416,10 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
-    if (e.props.isExpanded) {
+    const current = await read($, view)
+    // In fullscreen a click unfolds a group; the ctrl+o transcript there draws no groups at all.
+    const isCompact = current !== 'full' && (!e.props.isExpanded || e.viewport?.isFullscreen === true)
+    if (e.props.isExpanded && !isCompact) {
       for (const call of e.props.calls) if (call.tool_use_id !== undefined) groupRows.add(call.tool_use_id)
       return next(e)
     }
@@ -321,21 +427,37 @@ export const register: Register = on => {
       call: { ...call, id: call.tool_use_id ?? `${String(e.requestId)}-${index}` },
       shown: shellCommand(call.tool, call.input),
     }))
+    if (isCompact) {
+      const { Box } = $.ui.resolve(e)
+      const kept = calls.filter(one => current === 'line' || one.call.isRunning)
+      return Box({ flexDirection: 'column', children: kept.map(one => drawLine($, e, one.call)) })
+    }
     const shellCalls = calls.filter(one => one.shown !== undefined)
     if (shellCalls.length === 0) return next(e)
 
     const { Box } = $.ui.resolve(e)
-    const rows = shellCalls.length === calls.length ? [] : [await next(e)]
-    for (const one of shellCalls) {
-      if (one.shown !== undefined) rows.push(draw($, e, one.call, one.shown, true, true, e.viewport))
-    }
-    return Box({ flexDirection: 'column', children: rows })
+    const engineRows = shellCalls.length === calls.length ? [] : [await next(e)]
+    return withinBudget(hasHover =>
+      Box({
+        flexDirection: 'column',
+        children: [
+          ...engineRows,
+          ...shellCalls.flatMap(one => (one.shown === undefined ? [] : [draw($, e, one.call, one.shown, true, true, e.viewport, hasHover)])),
+        ],
+      }),
+    )
   })
 
   on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
+    const current = await read($, view)
     const call = { ...e.props, id: e.props.tool_use_id }
+    if (current !== 'full' && e.props.isExpanded !== true) {
+      if (current === 'line' || call.isRunning) return drawLine($, e, call)
+      const { Box } = $.ui.resolve(e)
+      return Box({ children: [] })
+    }
     const command = shellCommand(e.props.tool, e.props.input)
-    if (command !== undefined) return draw($, e, call, command, false, groupRows.has(call.id), e.viewport)
+    if (command !== undefined) return withinBudget(hasHover => draw($, e, call, command, false, groupRows.has(call.id), e.viewport, hasHover))
 
     const path = pathTarget(e.props.tool, e.props.input)
     const isGroupRow = groupRows.has(call.id)
@@ -348,7 +470,8 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {
-    if (groupRows.has(e.props.tool_use_id)) {
+    const current = await read($, view)
+    if (groupRows.has(e.props.tool_use_id) || (current !== 'full' && e.props.isExpanded !== true)) {
       const { Box } = $.ui.resolve(e)
       return Box({ children: [] })
     }

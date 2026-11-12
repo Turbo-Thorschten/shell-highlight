@@ -16,7 +16,7 @@ function row(tool: string, input: unknown, more: Record<string, unknown> = {}) {
   } as const
 }
 
-type GroupCall = { tool: string; input: unknown; tool_use_id?: string; output?: unknown }
+type GroupCall = { tool: string; input: unknown; tool_use_id?: string; output?: unknown; isRunning?: boolean }
 
 function group(calls: readonly GroupCall[], isExpanded = false) {
   return {
@@ -32,6 +32,133 @@ const SEQ = { tool_use_id: 'toolu_1', tool: 'Bash', input: { command: 'seq 1 8' 
 const READ = { tool_use_id: 'toolu_2', tool: 'Read', input: { file_path: 'README.md' } }
 const LONG_COMMAND = Array.from({ length: 14 }, (_, n) => `echo ${n + 1}`).join('\n')
 const LONG = { tool_use_id: 'toolu_1', tool: 'Bash', input: { command: LONG_COMMAND }, output: { stdout: 'ok', stderr: '' } }
+const TOOL_VIEW = { command: 'tool-view', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 100 } } as const
+
+type Node = { type: string; props?: Record<string, unknown>; hover?: Record<string, unknown>; children?: unknown[] }
+
+function nodes(tree: unknown): Node[] {
+  if (Array.isArray(tree)) return tree.flatMap(nodes)
+  if (tree === null || typeof tree !== 'object') return []
+  const node = tree as Node
+  return [node, ...nodes(node.children ?? [])]
+}
+
+function overlays(tree: unknown): { plain: string; code: unknown; over: Node }[] {
+  return nodes(tree).flatMap(node => {
+    const [plain, over] = (node.children ?? []) as Node[]
+    if (over?.props?.position !== 'absolute') return []
+    return [{ plain: String(plain?.children?.[0]), code: nodes(over.children).find(one => one.type === 'Code')?.props?.source, over }]
+  })
+}
+
+function result(more: Record<string, unknown> = {}) {
+  return {
+    plugin: 'shell-highlight',
+    component: 'ToolResult',
+    requestId: 'toolu_1',
+    viewport: VIEWPORT,
+    props: { tool_use_id: 'toolu_1', tool: 'Bash', output: SEQ.output, isErrored: false, ...more },
+  } as const
+}
+
+test('terminal: in fullscreen a command is plain, with its coloured copy shown only under the pointer', async ($, on) => {
+  on('ui.render', () => ENGINE_ROW)
+  const ui = await $.ui.mount({ ...row('Bash', { command: "node -e 'console.log(1)'" }), surface: 'terminal' })
+  const tree = await ui.drawn()
+  const found = overlays(tree)
+  expect(found.map(one => one.plain)).toEqual(["node -e '", 'console.log(1)', "'"])
+  expect(found.map(one => one.code)).toEqual(found.map(one => one.plain))
+  for (const one of found) {
+    expect(one.over.props).toMatchObject({ position: 'absolute', top: 0, left: 0, right: 0, display: 'none' })
+    expect(one.over.hover).toEqual({ display: 'flex' })
+  }
+  expect(nodes(tree).find(node => node.props?.key === 'call-toolu_1')).toBeDefined()
+  await ui.unmount()
+})
+
+test('terminal: a path in a command stays a link outside the coloured copy', async ($, on) => {
+  on('ui.render', () => ENGINE_ROW)
+  const ui = await $.ui.mount({ ...row('PowerShell', { command: 'node "C:\\a\\run.mjs"' }), surface: 'terminal' })
+  const tree = await ui.drawn()
+  expect(overlays(tree).map(one => one.plain)).toEqual(['node "', '"'])
+  const over = overlays(tree).flatMap(one => nodes(one.over))
+  expect(over.some(node => node.type === 'Markdown')).toBe(false)
+  expect(await ui.find({ type: 'Markdown', key: 'link-toolu_1-0' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('terminal: a command too long to draw twice is coloured at once', async ($, on) => {
+  on('ui.render', () => ENGINE_ROW)
+  const ui = await $.ui.mount({ ...row('Bash', { command: `echo ${'x '.repeat(30000)}` }, { isExpanded: true }), surface: 'terminal' })
+  expect(overlays(await ui.drawn())).toEqual([])
+  expect(await ui.find({ type: 'Code' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('terminal: a command that fits twice into a drawing keeps its coloured copy', async ($, on) => {
+  on('ui.render', () => ENGINE_ROW)
+  const ui = await $.ui.mount({ ...row('Bash', { command: `echo ${'x '.repeat(20000)}` }, { isExpanded: true }), surface: 'terminal' })
+  expect(overlays(await ui.drawn()).length).toBeGreaterThan(0)
+  await ui.unmount()
+})
+
+test('terminal: keys count against the drawing, so a copy that fits only without them is left out', async ($, on) => {
+  on('ui.render', () => ENGINE_ROW)
+  const ui = await $.ui.mount({ ...row('Bash', { command: `echo ${'x '.repeat(24734)}` }, { isExpanded: true }), surface: 'terminal' })
+  expect(overlays(await ui.drawn())).toEqual([])
+  await ui.unmount()
+})
+
+test('terminal: a command of many pieces is coloured at once when its copies would pass the node limit', async ($, on) => {
+  on('ui.render', () => ENGINE_ROW)
+  const command = "node -e 'a'; ".repeat(2400).trim()
+  const ui = await $.ui.mount({ ...row('Bash', { command }, { isExpanded: true }), surface: 'terminal' })
+  const tree = await ui.drawn()
+  expect(overlays(tree)).toEqual([])
+  expect(nodes(tree).length).toBeLessThanOrEqual(20000)
+  expect((await ui.findAll({ type: 'Code' })).length).toBeGreaterThan(0)
+  await ui.unmount()
+})
+
+test('terminal: the text of a drawing from beneath counts too, nested props included', async ($, on) => {
+  on('ui.render', (engine, e) => {
+    const { Select } = engine.ui.resolve(e)
+    const options = Array.from({ length: 10 }, (_, n) => ({ value: String(n), label: String(n).padEnd(9900, 'z') }))
+    return Select({ key: 'pick', options, onSelect: () => undefined })
+  })
+  const shell = { tool_use_id: 'toolu_1', tool: 'Bash', input: { command: `echo ${'x '.repeat(450)}` } }
+  const ui = await $.ui.mount({ ...group([shell, READ]), surface: 'terminal' })
+  expect(overlays(await ui.drawn())).toEqual([])
+  expect(await ui.find({ type: 'Code' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('terminal: a run whose coloured copies together would overflow its drawing is coloured at once', async ($, on) => {
+  on('ui.render', () => ENGINE_ROW)
+  const command = `echo ${'word '.repeat(150).trim()}`
+  const call = (id: string) => ({ tool_use_id: id, tool: 'Bash', input: { command }, output: { stdout: 'y'.repeat(49000), stderr: '' } })
+  const ui = await $.ui.mount({ ...group([call('toolu_1'), call('toolu_2')]), surface: 'terminal' })
+  expect(overlays(await ui.drawn())).toEqual([])
+  expect((await ui.findAll({ type: 'Code' })).length).toBe(2)
+  await ui.unmount()
+
+  const one = await $.ui.mount({ ...group([call('toolu_1')]), surface: 'terminal' })
+  expect(overlays(await one.drawn()).length).toBeGreaterThan(0)
+  await one.unmount()
+})
+
+for (const [name, surface, viewport] of [
+  ['terminal main screen', 'terminal', { ...VIEWPORT, isFullscreen: false }],
+  ['desktop', 'desktop', VIEWPORT],
+] as const) {
+  test(`${name}: without a pointer the command is coloured at once`, async ($, on) => {
+    on('ui.render', () => ENGINE_ROW)
+    const ui = await $.ui.mount({ ...row('Bash', { command: 'ls -la' }), viewport, surface })
+    expect(overlays(await ui.drawn())).toEqual([])
+    expect((await ui.find({ type: 'Code' }))?.props).toMatchObject({ source: 'ls -la' })
+    await ui.unmount()
+  })
+}
 
 for (const surface of ['terminal', 'desktop'] as const) {
   test(`${surface}: a Bash command is drawn as highlighted code`, async ($, on) => {
@@ -316,5 +443,103 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(await ui.find({ text: 'engine row' })).toBeDefined()
     expect(await ui.find({ type: 'Code' })).toBeUndefined()
     await ui.unmount()
+  })
+
+  test(`${surface}: /tool-view and the footer button cycle full, one line and off`, async ($, on) => {
+    on('ui.render', () => ENGINE_ROW)
+    const footer = await $.ui.mount({ plugin: 'shell-highlight', component: 'PromptHint', requestId: 'hint', viewport: VIEWPORT, props: { isDraft: false, isWorking: false, hint: '' }, surface })
+    const label = async () => (await footer.find({ type: 'Button', key: 'tool-view' }))?.props.label
+    expect(await label()).toBe('🔧 tools: full')
+    expect(await $.command.run(TOOL_VIEW)).toEqual({})
+    expect(await label()).toBe('🔧 tools: one line')
+    await footer.press({ key: 'tool-view' })
+    expect(await label()).toBe('🔧 tools: off')
+    await footer.press({ key: 'tool-view' })
+    expect(await label()).toBe('🔧 tools: full')
+    await footer.unmount()
+  })
+
+  test(`${surface}: the footer button sits after what is drawn beneath it`, async ($, on) => {
+    on('ui.render', () => ENGINE_ROW)
+    for (const isWorking of [true, false]) {
+      const footer = await $.ui.mount({ plugin: 'shell-highlight', component: 'PromptHint', requestId: 'hint', viewport: VIEWPORT, props: { isDraft: false, isWorking, hint: '' }, surface })
+      expect(await footer.find({ text: 'engine row' })).toBeDefined()
+      expect(await footer.find({ type: 'Button', key: 'tool-view' })).toBeDefined()
+      await footer.unmount()
+    }
+  })
+
+  test(`${surface}: a group unfolded by a click follows the view, the classic ctrl+o transcript does not`, async ($, on) => {
+    on('ui.render', () => ENGINE_ROW)
+    await $.command.run(TOOL_VIEW)
+    await $.command.run(TOOL_VIEW)
+    const clicked = await $.ui.mount({ ...group([READ, SEQ], true), surface })
+    expect(await clicked.find({ text: 'engine row' })).toBeUndefined()
+    expect(await clicked.find({ type: 'Text' })).toBeUndefined()
+    await clicked.unmount()
+    const transcript = await $.ui.mount({ ...group([READ, SEQ], true), viewport: { ...VIEWPORT, isFullscreen: false }, surface })
+    expect(await transcript.find({ text: 'engine row' })).toBeDefined()
+    await transcript.unmount()
+  })
+
+  test(`${surface}: in the one-line view every call is one line and no result is drawn`, async ($, on) => {
+    on('ui.render', () => ENGINE_ROW)
+    await $.command.run(TOOL_VIEW)
+    const bash = await $.ui.mount({ ...row('Bash', { command: 'seq 1 8', description: 'Count' }, { output: SEQ.output }), surface })
+    expect(await bash.find({ type: 'Code' })).toBeUndefined()
+    expect(await bash.find({ text: 'Bash' })).toBeDefined()
+    expect(await bash.find({ text: 'Count' })).toBeDefined()
+    expect(await bash.find({ text: 'line 1' })).toBeUndefined()
+    await bash.unmount()
+    const glob = await $.ui.mount({ ...row('Glob', { pattern: '*.md' }), surface })
+    expect(await glob.find({ text: 'engine row' })).toBeUndefined()
+    expect(await glob.find({ text: 'Glob' })).toBeDefined()
+    expect(await glob.find({ text: '*.md' })).toBeDefined()
+    await glob.unmount()
+    const read = await $.ui.mount({ ...row('Read', { file_path: 'README.md', offset: 3 }), surface })
+    expect(await read.find({ text: 'README.md · from line 3' })).toBeDefined()
+    await read.unmount()
+    const block = await $.ui.mount({ ...result(), surface })
+    expect(await block.find({ type: 'Text' })).toBeUndefined()
+    await block.unmount()
+    const folded = await $.ui.mount({ ...group([READ, SEQ]), surface })
+    expect(await folded.find({ text: 'engine row' })).toBeUndefined()
+    expect(await folded.find({ text: 'README.md' })).toBeDefined()
+    expect(await folded.find({ text: 'seq 1 8' })).toBeDefined()
+    expect(await folded.find({ type: 'Code' })).toBeUndefined()
+    await folded.unmount()
+  })
+
+  test(`${surface}: in the off view a finished call draws nothing and a running one keeps its line`, async ($, on) => {
+    on('ui.render', () => ENGINE_ROW)
+    await $.command.run(TOOL_VIEW)
+    await $.command.run(TOOL_VIEW)
+    const done = await $.ui.mount({ ...row('Read', { file_path: 'README.md' }), surface })
+    expect(await done.find({ type: 'Text' })).toBeUndefined()
+    await done.redraw({ tool_use_id: 'toolu_1', tool: 'Read', input: { file_path: 'README.md' }, ...DONE, isRunning: true })
+    expect(await done.find({ text: 'README.md' })).toBeDefined()
+    await done.unmount()
+    const block = await $.ui.mount({ ...result(), surface })
+    expect(await block.find({ type: 'Text' })).toBeUndefined()
+    await block.unmount()
+    const folded = await $.ui.mount({ ...group([READ, { ...SEQ, output: undefined, isRunning: true }]), surface })
+    expect(await folded.find({ text: 'README.md' })).toBeUndefined()
+    expect(await folded.find({ text: 'seq 1 8' })).toBeDefined()
+    await folded.unmount()
+  })
+
+  test(`${surface}: the full transcript still shows every call in full in the other views`, async ($, on) => {
+    on('ui.render', () => ENGINE_ROW)
+    await $.command.run(TOOL_VIEW)
+    await $.command.run(TOOL_VIEW)
+    const bash = await $.ui.mount({ ...row('Bash', SEQ.input, { isExpanded: true }), surface })
+    expect((await bash.find({ type: 'Code' }))?.props).toMatchObject({ source: 'seq 1 8' })
+    await bash.unmount()
+    const glob = await $.ui.mount({ ...row('Glob', { pattern: '*.md' }, { isExpanded: true }), surface })
+    expect(await glob.find({ text: 'engine row' })).toBeDefined()
+    await glob.unmount()
+    const block = await $.ui.mount({ ...result({ isExpanded: true }), surface })
+    expect(await block.find({ text: 'engine row' })).toBeDefined()
+    await block.unmount()
   })
 }

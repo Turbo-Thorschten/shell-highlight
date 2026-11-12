@@ -15,6 +15,18 @@ describe('layout', () => {
     expect(shape(layout('ls -la | head -n 3', 'bash', 80))).toEqual(['bash:ls -la | head -n 3'])
   })
 
+  test('a plain line wider than the room is wrapped at spaces inside its block', async () => {
+    expect(shape(layout('echo one two three four', 'bash', 12))).toEqual(['bash:echo one \ntwo three \nfour'])
+  })
+
+  test('a line with characters of unsure width is not wrapped, so no accent is cut off', async () => {
+    const command = '1234567890123456789é'
+    expect(shape(layout(command, 'bash', 20))).toEqual([`bash:${command}`])
+    for (const sequence of ['1'.repeat(18) + '\u{1f44d}\u{1f3fd}', '1'.repeat(19) + 'e\u{1ab0}']) {
+      expect(shape(layout(sequence, 'bash', 20))).toEqual([`bash:${sequence}`])
+    }
+  })
+
   test('a heredoc body takes the language of its interpreter', async () => {
     const command = "node <<'EOF'\nconst a = 1\nconsole.log(a)\nEOF"
     expect(shape(layout(command, 'bash', 80))).toEqual([
