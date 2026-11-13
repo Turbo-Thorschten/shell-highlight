@@ -69,13 +69,21 @@ describe('layout', () => {
     ])
   })
 
-  test('a word longer than the room is cut', async () => {
+  test('a word longer than any row is cut where the row stands', async () => {
     const command = `node -e '${'x'.repeat(50)}'`
     expect(shape(layout(command, 'bash', 20))).toEqual([
+      ["bash:node -e '", `javascript:${'x'.repeat(11)}`],
+      [`javascript:${'x'.repeat(20)}`],
+      [`javascript:${'x'.repeat(19)}`, "bash:'"],
+    ])
+  })
+
+  test('a word as wide as a row moves to the next row whole', async () => {
+    const command = `node -e '${'x'.repeat(12)} y'`
+    expect(shape(layout(command, 'bash', 12))).toEqual([
       ["bash:node -e '"],
-      [`javascript:${'x'.repeat(20)}`],
-      [`javascript:${'x'.repeat(20)}`],
-      [`javascript:${'x'.repeat(10)}`, "bash:'"],
+      [`javascript:${'x'.repeat(12)}`],
+      ['javascript: y', "bash:'"],
     ])
   })
 
@@ -253,6 +261,14 @@ describe('links in commands and output', () => {
           { source: '" x', language: 'powershell' },
         ],
       },
+    ])
+  })
+
+  test('a path longer than any row stays glued to the text before it', async () => {
+    expect(shape(layout('out=/c/Users/aaaa/bbbb; echo', 'bash', 12, {}))).toEqual([
+      ['bash:out=', 'bash:/c/Users'],
+      ['bash:/aaaa/bbbb', 'bash:; '],
+      ['bash:echo'],
     ])
   })
 

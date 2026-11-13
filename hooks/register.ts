@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderElement } from 'claude-code'
 
-import { cells, chunks, escapeMarkdown, fromLinkTarget, isWindowsPath, layout, lineCount, linkify, linkRows, linkTarget, outputLines, sniffLanguage, takeLines, visible } from './text'
+import { cells, chunks, escapeMarkdown, fromLinkTarget, isWindowsPath, layout, lineCount, linkify, linkRows, linkTarget, outputLines, sniffLanguage, visible } from './text'
 import type { Links, Piece, Shell } from './text'
 import type { ToolView } from '../types'
 
@@ -12,9 +12,7 @@ const PATH_TOOLS: Record<string, { label: string; field: string }> = {
   Write: { label: 'Write', field: 'file_path' },
   WebFetch: { label: 'Fetch', field: 'url' },
 }
-const FOLDED_COMMAND_LINES = 10
 const FOLDED_OUTPUT_LINES = 5
-const FOLD_SLACK = 1
 const DIM = 'inactive'
 const LIT = { color: 'text' }
 const VIEWS: ToolView[] = ['full', 'line', 'off']
@@ -66,8 +64,9 @@ function draw(
   hasOutput: boolean,
   viewport: { columns: number; isFullscreen?: boolean } | undefined,
   hasHover: boolean,
+  toggle?: { isOpen: boolean; onPress: () => void },
 ) {
-  const { Box, Text, Code, Markdown } = $.ui.resolve(e)
+  const { Box, Text, Code, Markdown, Button } = $.ui.resolve(e)
   const isHover = hasHover && e.surface === 'terminal' && viewport?.isFullscreen === true
   const columns = Math.max(20, (viewport?.columns ?? 80) - 6)
   const code = (piece: Piece, source: string) => {
@@ -117,25 +116,34 @@ function draw(
   ]
   if (shown.description !== '') header.push(dim(shown.description))
   if (call.isInterrupted) header.push(dim('Interrupted'))
+  if (toggle !== undefined) {
+    header.push(
+      Button({
+        key: `command-${call.id}`,
+        label: toggle.isOpen ? '(click to fold)' : '(click to show)',
+        plain: true,
+        dimColor: true,
+        onPress: toggle.onPress,
+      }),
+    )
+  }
 
   const blocks = layout(shown.command, shown.shell, columns, links())
-  const commandLines = lineCount(blocks)
-  const isCommandCut = isFolded && commandLines > FOLDED_COMMAND_LINES + FOLD_SLACK
   const body = []
-  const drawn = isCommandCut ? takeLines(blocks, FOLDED_COMMAND_LINES) : blocks
-  for (const block of drawn) {
-    if (block.kind === 'row') {
-      body.push(Box({ flexDirection: 'row', children: block.pieces.map(piece => cell(piece, one => code(one, one.source))) }))
-    } else {
-      for (const source of chunks(block.piece.source)) body.push(code(block.piece, source))
+  if (!isFolded && toggle?.isOpen !== false) {
+    for (const block of blocks) {
+      if (block.kind === 'row') {
+        body.push(Box({ flexDirection: 'row', children: block.pieces.map(piece => cell(piece, one => code(one, one.source))) }))
+      } else {
+        for (const source of chunks(block.piece.source)) body.push(code(block.piece, source))
+      }
     }
   }
-  let hidden = isCommandCut ? commandLines - FOLDED_COMMAND_LINES : 0
-  if (hidden > 0) body.push(dim('…'))
+  let hidden = isFolded ? lineCount(blocks) : 0
 
   const result = []
   const lines = hasOutput ? outputLines(call.output) : []
-  const isOutputCut = isFolded && lines.length > FOLDED_OUTPUT_LINES + FOLD_SLACK
+  const isOutputCut = isFolded && lines.length > FOLDED_OUTPUT_LINES
   const visibleLines = isOutputCut ? lines.slice(0, FOLDED_OUTPUT_LINES) : lines
   hidden += lines.length - visibleLines.length
   if (call.isRunning) result.push(dim('Running…'))
@@ -156,7 +164,7 @@ function draw(
     }
     flush()
   } else if (hasOutput && call.output !== undefined) result.push(dim('(no output)'))
-  if (hidden > 0) result.push(dim(`… +${hidden} lines (${viewport?.isFullscreen === true ? 'click' : 'ctrl+o'} to expand)`))
+  if (hidden > 0) result.push(dim(`… +${hidden} ${hidden === 1 ? 'line' : 'lines'} (${viewport?.isFullscreen === true ? 'click' : 'ctrl+o'} to expand)`))
 
   if (result.length > 0) {
     body.push(
@@ -185,8 +193,7 @@ function stringLength(value: unknown): number {
   return Object.values(value).reduce<number>((sum, one) => sum + stringLength(one), 0)
 }
 
-// Every string counts, props too, nested ones included (a Select's options from a mod beneath):
-// the engine counts keys as well as text, so this errs on the safe side.
+// Every string counts, props too: the engine counts keys as well as text, so this errs on the safe side.
 function treeSize(node: unknown): { chars: number; nodes: number } {
   if (typeof node === 'string') return { chars: node.length, nodes: 1 }
   if (node === null || typeof node !== 'object') return { chars: 0, nodes: 0 }
@@ -270,7 +277,9 @@ async function openTarget($: EngineInterface, target: string) {
   const openers = isUrl || isWindowsPath(target) ? ['explorer.exe', 'xdg-open', 'open'] : ['xdg-open', 'open', 'explorer.exe']
   for (const opener of openers) {
     try {
-      await $.process.run([opener, local])
+      const { exitCode } = await $.process.run([opener, local])
+      // explorer.exe exits with 1 even when it opened the target.
+      if (exitCode !== 0 && opener !== 'explorer.exe') continue
       $.ui.toast(`Opening ${local}`)
       return
     } catch {}
@@ -437,15 +446,13 @@ export const register: Register = on => {
 
     const { Box } = $.ui.resolve(e)
     const engineRows = shellCalls.length === calls.length ? [] : [await next(e)]
-    return withinBudget(hasHover =>
-      Box({
-        flexDirection: 'column',
-        children: [
-          ...engineRows,
-          ...shellCalls.flatMap(one => (one.shown === undefined ? [] : [draw($, e, one.call, one.shown, true, true, e.viewport, hasHover)])),
-        ],
-      }),
-    )
+    return Box({
+      flexDirection: 'column',
+      children: [
+        ...engineRows,
+        ...shellCalls.flatMap(one => (one.shown === undefined ? [] : [draw($, e, one.call, one.shown, true, true, e.viewport, false)])),
+      ],
+    })
   })
 
   on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
@@ -456,11 +463,20 @@ export const register: Register = on => {
       const { Box } = $.ui.resolve(e)
       return Box({ children: [] })
     }
+    const isGroupRow = groupRows.has(call.id)
     const command = shellCommand(e.props.tool, e.props.input)
-    if (command !== undefined) return withinBudget(hasHover => draw($, e, call, command, false, groupRows.has(call.id), e.viewport, hasHover))
+    if (command !== undefined) {
+      const toggle =
+        isGroupRow || e.props.isExpanded === true || e.viewport?.isFullscreen !== true
+          ? undefined
+          : {
+              isOpen: (await read($, shown)).includes(call.id),
+              onPress: () => void update($, shown, list => (list.includes(call.id) ? list.filter(one => one !== call.id) : [...list, call.id])),
+            }
+      return withinBudget(hasHover => draw($, e, call, command, false, isGroupRow, e.viewport, hasHover, toggle))
+    }
 
     const path = pathTarget(e.props.tool, e.props.input)
-    const isGroupRow = groupRows.has(call.id)
     if (path === undefined || (isGroupRow && e.props.tool !== 'Read')) return next(e)
     const header = drawPathHeader($, e, call, path)
     const file = isGroupRow ? readFile(e.props.output) : undefined
@@ -471,7 +487,9 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {
     const current = await read($, view)
-    if (groupRows.has(e.props.tool_use_id) || (current !== 'full' && e.props.isExpanded !== true)) {
+    const isDrawnByRow =
+      groupRows.has(e.props.tool_use_id) && (SHELLS[e.props.tool] !== undefined || (e.props.tool === 'Read' && readFile(e.props.output) !== undefined))
+    if (isDrawnByRow || (current !== 'full' && e.props.isExpanded !== true)) {
       const { Box } = $.ui.resolve(e)
       return Box({ children: [] })
     }

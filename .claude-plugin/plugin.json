@@ -1,7 +1,7 @@
 {
   "name": "shell-highlight",
   "version": "0.3.1",
-  "description": "Draws Bash and PowerShell tool calls with syntax-highlighted commands, clickable paths and unfoldable reads",
+  "description": "Draws Bash and PowerShell calls with highlighted commands (hidden in folded runs until clicked), makes paths in tool rows, shell output and replies open on a click, unfolds Read results, and adds /tool-view to draw all tool calls in full, as one line each or not at all",
   "author": { "name": "Turbo-Thorschten", "url": "https://github.com/Turbo-Thorschten" },
   "license": "MIT",
   "types": "./types/index.d.ts",

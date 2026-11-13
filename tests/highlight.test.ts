@@ -64,6 +64,7 @@ function result(more: Record<string, unknown> = {}) {
 test('terminal: in fullscreen a command is plain, with its coloured copy shown only under the pointer', async ($, on) => {
   on('ui.render', () => ENGINE_ROW)
   const ui = await $.ui.mount({ ...row('Bash', { command: "node -e 'console.log(1)'" }), surface: 'terminal' })
+  await ui.press({ key: 'command-toolu_1' })
   const tree = await ui.drawn()
   const found = overlays(tree)
   expect(found.map(one => one.plain)).toEqual(["node -e '", 'console.log(1)', "'"])
@@ -79,6 +80,7 @@ test('terminal: in fullscreen a command is plain, with its coloured copy shown o
 test('terminal: a path in a command stays a link outside the coloured copy', async ($, on) => {
   on('ui.render', () => ENGINE_ROW)
   const ui = await $.ui.mount({ ...row('PowerShell', { command: 'node "C:\\a\\run.mjs"' }), surface: 'terminal' })
+  await ui.press({ key: 'command-toolu_1' })
   const tree = await ui.drawn()
   expect(overlays(tree).map(one => one.plain)).toEqual(['node "', '"'])
   const over = overlays(tree).flatMap(one => nodes(one.over))
@@ -120,31 +122,28 @@ test('terminal: a command of many pieces is coloured at once when its copies wou
   await ui.unmount()
 })
 
-test('terminal: the text of a drawing from beneath counts too, nested props included', async ($, on) => {
-  on('ui.render', (engine, e) => {
-    const { Select } = engine.ui.resolve(e)
-    const options = Array.from({ length: 10 }, (_, n) => ({ value: String(n), label: String(n).padEnd(9900, 'z') }))
-    return Select({ key: 'pick', options, onSelect: () => undefined })
-  })
-  const shell = { tool_use_id: 'toolu_1', tool: 'Bash', input: { command: `echo ${'x '.repeat(450)}` } }
-  const ui = await $.ui.mount({ ...group([shell, READ]), surface: 'terminal' })
-  expect(overlays(await ui.drawn())).toEqual([])
-  expect(await ui.find({ type: 'Code' })).toBeDefined()
-  await ui.unmount()
+test('terminal: a command one step inside the drawing keeps its coloured copy, one step past it is coloured at once', async ($, on) => {
+  on('ui.render', () => ENGINE_ROW)
+  const inside = await $.ui.mount({ ...row('Bash', { command: `echo ${'x '.repeat(24691)}` }, { isExpanded: true }), surface: 'terminal' })
+  expect(overlays(await inside.drawn()).length).toBeGreaterThan(0)
+  expect(await inside.find({ type: 'Code' })).toBeDefined()
+  await inside.unmount()
+  const past = await $.ui.mount({ ...row('Bash', { command: `echo ${'x '.repeat(24692)}` }, { isExpanded: true }), surface: 'terminal' })
+  expect(overlays(await past.drawn())).toEqual([])
+  expect(await past.find({ type: 'Code' })).toBeDefined()
+  await past.unmount()
 })
 
-test('terminal: a run whose coloured copies together would overflow its drawing is coloured at once', async ($, on) => {
+test('terminal: the props of many pieces count against the drawing, one step inside or past it', async ($, on) => {
   on('ui.render', () => ENGINE_ROW)
-  const command = `echo ${'word '.repeat(150).trim()}`
-  const call = (id: string) => ({ tool_use_id: id, tool: 'Bash', input: { command }, output: { stdout: 'y'.repeat(49000), stderr: '' } })
-  const ui = await $.ui.mount({ ...group([call('toolu_1'), call('toolu_2')]), surface: 'terminal' })
-  expect(overlays(await ui.drawn())).toEqual([])
-  expect((await ui.findAll({ type: 'Code' })).length).toBe(2)
-  await ui.unmount()
-
-  const one = await $.ui.mount({ ...group([call('toolu_1')]), surface: 'terminal' })
-  expect(overlays(await one.drawn()).length).toBeGreaterThan(0)
-  await one.unmount()
+  const inside = await $.ui.mount({ ...row('Bash', { command: "node -e 'a'; ".repeat(926).trim() }, { isExpanded: true }), surface: 'terminal' })
+  expect(overlays(await inside.drawn()).length).toBeGreaterThan(0)
+  expect(await inside.find({ type: 'Code' })).toBeDefined()
+  await inside.unmount()
+  const past = await $.ui.mount({ ...row('Bash', { command: "node -e 'a'; ".repeat(927).trim() }, { isExpanded: true }), surface: 'terminal' })
+  expect(overlays(await past.drawn())).toEqual([])
+  expect(await past.find({ type: 'Code' })).toBeDefined()
+  await past.unmount()
 })
 
 for (const [name, surface, viewport] of [
@@ -154,6 +153,7 @@ for (const [name, surface, viewport] of [
   test(`${name}: without a pointer the command is coloured at once`, async ($, on) => {
     on('ui.render', () => ENGINE_ROW)
     const ui = await $.ui.mount({ ...row('Bash', { command: 'ls -la' }), viewport, surface })
+    if (viewport.isFullscreen) await ui.press({ key: 'command-toolu_1' })
     expect(overlays(await ui.drawn())).toEqual([])
     expect((await ui.find({ type: 'Code' }))?.props).toMatchObject({ source: 'ls -la' })
     await ui.unmount()
@@ -164,6 +164,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
   test(`${surface}: a Bash command is drawn as highlighted code`, async ($, on) => {
     on('ui.render', () => ENGINE_ROW)
     const ui = await $.ui.mount({ ...row('Bash', { command: 'cd ~/.claude && ls -la', description: 'List' }), surface })
+    await ui.press({ key: 'command-toolu_1' })
     expect((await ui.find({ type: 'Code' }))?.props).toMatchObject({ source: 'cd ~/.claude && ls -la', language: 'bash' })
     expect(await ui.find({ text: 'List' })).toBeDefined()
     expect(await ui.find({ text: 'engine row' })).toBeUndefined()
@@ -173,6 +174,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
   test(`${surface}: a PowerShell command is drawn as highlighted code`, async ($, on) => {
     on('ui.render', () => ENGINE_ROW)
     const ui = await $.ui.mount({ ...row('PowerShell', { command: 'Get-ChildItem -Force' }), surface })
+    await ui.press({ key: 'command-toolu_1' })
     expect((await ui.find({ type: 'Code' }))?.props).toMatchObject({ language: 'powershell' })
     await ui.unmount()
   })
@@ -181,6 +183,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
     on('ui.render', () => ENGINE_ROW)
     const command = "node <<'EOF'\nconsole.log(1)\nEOF"
     const ui = await $.ui.mount({ ...row('Bash', { command }), surface })
+    await ui.press({ key: 'command-toolu_1' })
     const languages = (await ui.findAll({ type: 'Code' })).map(code => code.props?.language)
     expect(languages).toEqual(['bash', 'javascript', 'bash'])
     await ui.unmount()
@@ -189,6 +192,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
   test(`${surface}: a command with control characters is still drawn`, async ($, on) => {
     on('ui.render', () => ENGINE_ROW)
     const ui = await $.ui.mount({ ...row('Bash', { command: 'printf "\u001b[31mred"' }), surface })
+    await ui.press({ key: 'command-toolu_1' })
     expect((await ui.find({ type: 'Code' }))?.props).toMatchObject({ source: 'printf "␛[31mred"' })
     await ui.unmount()
   })
@@ -197,6 +201,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
     on('ui.render', () => ENGINE_ROW)
     const command = Array.from({ length: 8 }, (_, n) => `echo ${'x'.repeat(3000)}${n}`).join('\n')
     const ui = await $.ui.mount({ ...row('Bash', { command }), surface })
+    await ui.press({ key: 'command-toolu_1' })
     expect((await ui.findAll({ type: 'Code' })).length).toBe(3)
     await ui.unmount()
   })
@@ -227,6 +232,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
   test(`${surface}: a row on its own draws the command and leaves the output to the engine`, async ($, on) => {
     on('ui.render', () => ENGINE_ROW)
     const ui = await $.ui.mount({ ...row('Bash', SEQ.input, { output: SEQ.output }), surface })
+    await ui.press({ key: 'command-toolu_1' })
     expect((await ui.find({ type: 'Code' }))?.props).toMatchObject({ source: 'seq 1 8' })
     expect(await ui.find({ text: 'line 1' })).toBeUndefined()
     await ui.unmount()
@@ -240,6 +246,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
   test(`${surface}: a call that has not run yet has no output line`, async ($, on) => {
     on('ui.render', () => ENGINE_ROW)
     const ui = await $.ui.mount({ ...row('Bash', { command: 'true' }), surface })
+    await ui.press({ key: 'command-toolu_1' })
     expect(await ui.find({ type: 'Code' })).toBeDefined()
     expect(await ui.find({ text: '(no output)' })).toBeUndefined()
     expect(await ui.find({ text: '⎿' })).toBeUndefined()
@@ -258,6 +265,19 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(await block.find({ text: 'engine row' })).toBeUndefined()
     await block.unmount()
     await drawn.unmount()
+    await unfolded.unmount()
+  })
+
+  test(`${surface}: in the ctrl+o transcript the result of another tool of an unfolded run stays the engine's`, async ($, on) => {
+    on('ui.render', () => ENGINE_ROW)
+    const glob = { tool_use_id: 'toolu_3', tool: 'Glob', input: { pattern: '*.txt' }, output: { filenames: ['a.txt'] } }
+    const unfolded = await $.ui.mount({ ...group([glob, SEQ], true), surface })
+    const globBlock = await $.ui.mount({ ...result({ tool_use_id: 'toolu_3', tool: 'Glob', output: glob.output, isExpanded: true }), requestId: 'toolu_3', surface })
+    expect(await globBlock.find({ text: 'engine row' })).toBeDefined()
+    await globBlock.unmount()
+    const shellBlock = await $.ui.mount({ ...result({ isExpanded: true }), surface })
+    expect(await shellBlock.find({ text: 'engine row' })).toBeUndefined()
+    await shellBlock.unmount()
     await unfolded.unmount()
   })
 
@@ -281,23 +301,79 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await ui.unmount()
   })
 
-  test(`${surface}: a folded group of shell calls is drawn as folded commands`, async ($, on) => {
+  test(`${surface}: a folded group of shell calls hides the commands and shows the start of the output`, async ($, on) => {
     on('ui.render', () => ENGINE_ROW)
     const ui = await $.ui.mount({ ...group([SEQ]), surface })
     expect(await ui.find({ text: 'engine row' })).toBeUndefined()
-    expect((await ui.find({ type: 'Code' }))?.props).toMatchObject({ source: 'seq 1 8' })
+    expect(await ui.find({ type: 'Code' })).toBeUndefined()
     expect(await ui.find({ text: 'line 5' })).toBeDefined()
     expect(await ui.find({ text: 'line 6' })).toBeUndefined()
-    expect(await ui.find({ text: '… +3 lines (click to expand)' })).toBeDefined()
+    expect(await ui.find({ text: '… +4 lines (click to expand)' })).toBeDefined()
     await ui.unmount()
   })
 
-  test(`${surface}: a folded group cuts a long command and counts its lines`, async ($, on) => {
+  test(`${surface}: a folded group counts the lines of a hidden command`, async ($, on) => {
     on('ui.render', () => ENGINE_ROW)
     const ui = await $.ui.mount({ ...group([LONG]), surface })
-    expect((await ui.find({ type: 'Code' }))?.props?.source).toBe(LONG_COMMAND.split('\n').slice(0, 10).join('\n'))
-    expect(await ui.find({ text: '… +4 lines (click to expand)' })).toBeDefined()
+    expect(await ui.find({ type: 'Code' })).toBeUndefined()
+    expect(await ui.find({ text: '… +14 lines (click to expand)' })).toBeDefined()
     await ui.unmount()
+  })
+
+  test(`${surface}: a folded group shows up to 5 lines of output and counts the rest with the command`, async ($, on) => {
+    on('ui.render', () => ENGINE_ROW)
+    for (const [count, hint] of [[5, '… +1 line (click to expand)'], [6, '… +2 lines (click to expand)'], [7, '… +3 lines (click to expand)']] as const) {
+      const stdout = Array.from({ length: count }, (_, n) => `line ${n + 1}`).join('\n')
+      const ui = await $.ui.mount({ ...group([{ tool_use_id: 'toolu_1', tool: 'Bash', input: { command: 'seq 1 9' }, output: { stdout, stderr: '' } }]), surface })
+      expect(await ui.find({ text: 'line 5' })).toBeDefined()
+      expect(await ui.find({ text: 'line 6' })).toBeUndefined()
+      expect(await ui.find({ text: hint })).toBeDefined()
+      await ui.unmount()
+    }
+  })
+
+  test(`${surface}: a folded group counts a one-line command as one line`, async ($, on) => {
+    on('ui.render', () => ENGINE_ROW)
+    const ui = await $.ui.mount({ ...group([{ tool_use_id: 'toolu_1', tool: 'Bash', input: { command: 'true' }, output: { stdout: 'ok', stderr: '' } }]), surface })
+    expect(await ui.find({ text: 'ok' })).toBeDefined()
+    expect(await ui.find({ text: '… +1 line (click to expand)' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test(`${surface}: in fullscreen a row on its own hides the command until clicked`, async ($, on) => {
+    on('ui.render', () => ENGINE_ROW)
+    const ui = await $.ui.mount({ ...row('Bash', { ...SEQ.input, description: 'Count' }), surface })
+    expect(await ui.find({ type: 'Code' })).toBeUndefined()
+    expect(await ui.find({ text: 'Count' })).toBeDefined()
+    expect((await ui.find({ type: 'Button', key: 'command-toolu_1' }))?.props).toMatchObject({ label: '(click to show)', plain: true, dimColor: true })
+    await ui.press({ key: 'command-toolu_1' })
+    expect((await ui.find({ type: 'Code' }))?.props).toMatchObject({ source: 'seq 1 8' })
+    expect((await ui.find({ type: 'Button', key: 'command-toolu_1' }))?.props.label).toBe('(click to fold)')
+    await ui.press({ key: 'command-toolu_1' })
+    expect(await ui.find({ type: 'Code' })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test(`${surface}: a row of an unfolded group shows its command without a toggle`, async ($, on) => {
+    on('ui.render', () => ENGINE_ROW)
+    const unfolded = await $.ui.mount({ ...group([SEQ], true), surface })
+    const ui = await $.ui.mount({ ...row('Bash', SEQ.input, { output: SEQ.output }), surface })
+    expect((await ui.find({ type: 'Code' }))?.props).toMatchObject({ source: 'seq 1 8' })
+    expect(await ui.find({ type: 'Button' })).toBeUndefined()
+    await ui.unmount()
+    await unfolded.unmount()
+  })
+
+  test(`${surface}: outside fullscreen and in the ctrl+o transcript a row on its own shows its command without a toggle`, async ($, on) => {
+    on('ui.render', () => ENGINE_ROW)
+    const classic = await $.ui.mount({ ...row('Bash', SEQ.input), viewport: { ...VIEWPORT, isFullscreen: false }, surface })
+    expect((await classic.find({ type: 'Code' }))?.props).toMatchObject({ source: 'seq 1 8' })
+    expect(await classic.find({ type: 'Button' })).toBeUndefined()
+    await classic.unmount()
+    const transcript = await $.ui.mount({ ...row('Bash', SEQ.input, { isExpanded: true }), surface })
+    expect((await transcript.find({ type: 'Code' }))?.props).toMatchObject({ source: 'seq 1 8' })
+    expect(await transcript.find({ type: 'Button' })).toBeUndefined()
+    await transcript.unmount()
   })
 
   test(`${surface}: a folded mixed group keeps the engine's line above the commands`, async ($, on) => {
@@ -309,8 +385,8 @@ for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...group([READ, SEQ]), surface })
     expect(seen).toEqual([false])
     expect(await ui.find({ text: 'engine row' })).toBeDefined()
-    expect((await ui.find({ type: 'Code' }))?.props).toMatchObject({ source: 'seq 1 8' })
-    expect(await ui.find({ text: '… +3 lines (click to expand)' })).toBeDefined()
+    expect(await ui.find({ type: 'Code' })).toBeUndefined()
+    expect(await ui.find({ text: '… +4 lines (click to expand)' })).toBeDefined()
     await ui.unmount()
   })
 
@@ -338,6 +414,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
       return { value: { exitCode: 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     })
     const ui = await $.ui.mount({ ...row('PowerShell', { command: 'node "C:\\a\\run.mjs"' }), surface })
+    await ui.press({ key: 'command-toolu_1' })
     expect((await ui.find({ type: 'Markdown', key: 'link-toolu_1-0' }))?.props?.text).toBe('[C:\\\\a\\\\run\\.mjs](file:///C:/a/run.mjs)')
     await ui.press({ key: 'link-toolu_1-0', link: { href: 'file:///C:/a/run.mjs' } })
     expect(opened).toEqual([['explorer.exe', 'C:\\a\\run.mjs']])
@@ -379,9 +456,38 @@ for (const surface of ['terminal', 'desktop'] as const) {
       return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     })
     const ui = await $.ui.mount({ ...row('PowerShell', { command: 'dir C:\\work\\here' }), surface })
+    await ui.press({ key: 'command-toolu_1' })
     await ui.press({ key: 'link-toolu_1-0', link: { href: 'file:///C:/work/here' } })
     expect(opened.map(argv => argv[0])).toEqual(['powershell.exe'])
     expect(opened[0]?.[4]).toContain("$p = 'C:\\work\\here'")
+    await ui.unmount()
+  })
+
+  test(`${surface}: an opener that exits with an error hands the path to the next one`, async ($, on) => {
+    on('ui.render', () => ENGINE_ROW)
+    const toasts: string[] = []
+    on('ui.toast', ($$, e) => {
+      toasts.push(e.text)
+      return { value: undefined }
+    })
+    const opened: string[] = []
+    const exits: Record<string, number | undefined> = { 'xdg-open': 3, open: 0 }
+    on('process.run', ($$, e) => {
+      const opener = e.argv[0] ?? ''
+      opened.push(opener)
+      const exitCode = exits[opener]
+      if (exitCode === undefined) return { deny: 'not found' }
+      return { value: { exitCode, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    })
+    const ui = await $.ui.mount({ ...row('Edit', { file_path: '/tmp/x.ts', old_string: 'a', new_string: 'b' }), surface })
+    await ui.press({ key: 'path-toolu_1', link: { href: 'file:///tmp/x.ts' } })
+    expect(opened).toEqual(['xdg-open', 'open'])
+    expect(toasts).toEqual(['Opening /tmp/x.ts'])
+    exits['open'] = 1
+    opened.length = 0
+    await ui.press({ key: 'path-toolu_1', link: { href: 'file:///tmp/x.ts' } })
+    expect(opened).toEqual(['xdg-open', 'open', 'explorer.exe'])
+    expect(toasts).toEqual(['Opening /tmp/x.ts', 'Could not open /tmp/x.ts'])
     await ui.unmount()
   })
 

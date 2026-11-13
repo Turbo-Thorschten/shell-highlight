@@ -105,7 +105,8 @@ function wrap(parts: Piece[], columns: number): Piece[][] {
       continue
     }
     const found = breakAt(piece.source, room)
-    const cut = found > 0 ? found : row.length > 0 ? 0 : Math.max(-found, [...piece.source][0]?.length ?? 1)
+    const isLongerThanRow = width > columns && breakAt(piece.source, columns + 1) <= 0
+    const cut = found > 0 ? found : row.length === 0 ? Math.max(-found, [...piece.source][0]?.length ?? 1) : isLongerThanRow ? -found : 0
     if (cut > 0) row.push({ ...piece, source: piece.source.slice(0, cut) })
     queue.unshift({ ...piece, source: piece.source.slice(cut) })
     rows.push([])
