@@ -429,7 +429,11 @@ export const register: Register = on => {
     // In fullscreen a click unfolds a group; the ctrl+o transcript there draws no groups at all.
     const isCompact = current !== 'full' && (!e.props.isExpanded || e.viewport?.isFullscreen === true)
     if (e.props.isExpanded && !isCompact) {
+      const known = groupRows.size
       for (const call of e.props.calls) if (call.tool_use_id !== undefined) groupRows.add(call.tool_use_id)
+      // The engine reuses a row's last drawing while its props stay the same, and a row of an unfolded run
+      // has the props of the same row drawn on its own in ctrl+o, so rows drawn before this run unfolded are redrawn.
+      if (groupRows.size > known) $.ui.invalidate('ui.render')
       return next(e)
     }
     const calls = e.props.calls.map((call, index) => ({

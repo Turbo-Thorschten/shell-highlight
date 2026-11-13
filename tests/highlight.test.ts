@@ -268,6 +268,20 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await unfolded.unmount()
   })
 
+  test(`${surface}: a row drawn on its own before its run unfolds is drawn again with its output`, async ($, on) => {
+    on('ui.render', () => ENGINE_ROW)
+    const alone = await $.ui.mount({ ...row('Bash', SEQ.input, { output: SEQ.output, isExpanded: true }), surface })
+    const block = await $.ui.mount({ ...result({ isExpanded: true }), surface })
+    expect(await alone.find({ text: 'line 1' })).toBeUndefined()
+    expect(await block.find({ text: 'engine row' })).toBeDefined()
+    const unfolded = await $.ui.mount({ ...group([SEQ], true), surface })
+    expect(await alone.find({ text: 'line 1' })).toBeDefined()
+    expect(await block.find({ text: 'engine row' })).toBeUndefined()
+    await unfolded.unmount()
+    await block.unmount()
+    await alone.unmount()
+  })
+
   test(`${surface}: in the ctrl+o transcript the result of another tool of an unfolded run stays the engine's`, async ($, on) => {
     on('ui.render', () => ENGINE_ROW)
     const glob = { tool_use_id: 'toolu_3', tool: 'Glob', input: { pattern: '*.txt' }, output: { filenames: ['a.txt'] } }
@@ -545,7 +559,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
       return ENGINE_ROW
     })
     const ui = await $.ui.mount({ ...group([SEQ], true), surface })
-    expect(seen).toEqual([true])
+    expect(seen).toEqual([true, true])
     expect(await ui.find({ text: 'engine row' })).toBeDefined()
     expect(await ui.find({ type: 'Code' })).toBeUndefined()
     await ui.unmount()
